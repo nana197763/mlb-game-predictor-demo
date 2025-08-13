@@ -4,6 +4,12 @@ import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import { PredictRequestSchema, PredictResponseSchema } from "./utils/schema.js";
 
+// ⬇⬇ 新增：用來定位 public 目錄
+import path from "path";
+import { fileURLToPath } from "url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 dotenv.config();
 
 const app = express();
@@ -63,18 +69,24 @@ function heuristicFallback({ teamA, teamB, location }) {
   };
 }
 
+// ⬇⬇ 新增：托管前端（Build 後會把 client/dist 複製到 server/public）
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir));
+// SPA fallback（除了 /api，其餘路徑都回 index.html）
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api")) return next();
+  return res.sendFile(path.join(publicDir, "index.html"));
+});
+
 app.post("/api/predict", async (req, res) => {
-  // Validate request
   const parsed = PredictRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.issues });
   }
   const { teamA, teamB, date, location, league = "MLB" } = parsed.data;
 
-  // TODO: Replace with real data sources (stats, odds, pitchers, h2h)
   const stats = buildStubStats(teamA, teamB);
 
-  // Compose prompt
   const userContent = `
 聯盟：${league}
 比賽日期：${date}
@@ -124,27 +136,20 @@ ${stats}
     const raw = data?.choices?.[0]?.message?.content || "";
     let parsedJSON = safeParseModelJSON(raw);
 
-    // Validate & fix if necessary
     if (parsedJSON) {
-      // Normalize winRate sum
       if (parsedJSON?.winRate) {
         const a = Number(parsedJSON.winRate.teamA) || 0;
         const b = Number(parsedJSON.winRate.teamB) || 0;
         const sum = a + b;
         if (sum > 0 && Math.abs(sum - 100) > 0.6) {
-          // scale to 100
           parsedJSON.winRate.teamA = Number((a * 100 / sum).toFixed(1));
           parsedJSON.winRate.teamB = Number((b * 100 / sum).toFixed(1));
         }
       }
-
       const validated = PredictResponseSchema.safeParse(parsedJSON);
-      if (validated.success) {
-        return res.json(validated.data);
-      }
+      if (validated.success) return res.json(validated.data);
     }
 
-    // Fallback
     return res.json(heuristicFallback({ teamA, teamB, location }));
   } catch (err) {
     console.error(err);
