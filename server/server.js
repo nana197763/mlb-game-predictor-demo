@@ -38,12 +38,12 @@ function safeParseModelJSON(text) {
 }
 function heuristicFallback({ teamA, teamB, location }) {
   const baseA = 45, baseB = 55;
-  const adj = location?.toLowerCase?.().includes(teamB.toLowerCase()) ? 3 : 0;
+  const adj = location?.toLowerCase?.().includes((teamB||"").toLowerCase()) ? 3 : 0;
   const teamAPct = Math.max(0, Math.min(100, baseA - adj));
   const teamBPct = Math.max(0, Math.min(100, baseB + adj));
   const pred = `${teamA} 4 - 5 ${teamB}`;
   return {
-    teamA, teamB, location,
+    teamA, teamB, location: location || null,
     prediction: pred,
     winRate: { teamA: teamAPct, teamB: teamBPct },
     summaryZh: `（備援）依啟發式評估，${teamB} 小幅領先，預測 5-4 勝 ${teamA}`,
@@ -53,33 +53,42 @@ function heuristicFallback({ teamA, teamB, location }) {
 
 /* ───── Predict ───── */
 app.post("/api/predict", async (req, res) => {
+  // 前端不再送 location，但 schema 允許；我們忽略它，改由資料層自動判斷
   const parsed = PredictRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.issues });
   }
 
-  const { teamA, teamB, date, location, league = "MLB" } = parsed.data;
+  const { teamA, teamB, date, league = "MLB" } = parsed.data;
+  if (!league || !teamA || !teamB || !date) {
+    return res.status(400).json({ error: "Invalid input", message: "需要聯盟、隊伍 A、隊伍 B、日期。" });
+  }
+  if (teamA === teamB) {
+    return res.status(400).json({ error: "Invalid input", message: "兩隊不可相同。" });
+  }
 
   // 日期 guard（-1 ~ +1 年）
   const d = new Date(date), now = new Date();
   const min = new Date(now.getFullYear() - 1, 0, 1);
   const max = new Date(now.getFullYear() + 1, 11, 31);
   if (!(d >= min && d <= max)) {
-    return res.status(400).json({ error: "Invalid input", message: "Date out of supported range." });
+    return res.status(400).json({ error: "Invalid input", message: "日期超出支援範圍。" });
   }
 
   // 取得真實資料（含：季戰績/近況/交手/球場/先發/傷兵）
   let statsBundle;
   try {
-    statsBundle = await buildStats({ league, teamA, teamB, date, location });
+    statsBundle = await buildStats({ league, teamA, teamB, date });
   } catch (err) {
     if (err?.status === 400) {
+      // 嚴格：當天沒有這場比賽、或隊名/聯盟錯誤 → 直接回 400，不出預測
       return res.status(400).json({ error: "Invalid input", message: err.message });
     }
     console.error("[predict] data source failure:", err);
     return res.status(500).json({ error: "Data source failed", message: err.message });
   }
 
+  const resolvedLocation = statsBundle.location || null;
   const pitcherALine = statsBundle.pitchersByTeam?.[teamA] || "未定";
   const pitcherBLine = statsBundle.pitchersByTeam?.[teamB] || "未定";
   const injuriesALine = (statsBundle.injuriesByTeam?.[teamA] || []).join(", ") || "無";
@@ -89,7 +98,7 @@ app.post("/api/predict", async (req, res) => {
 【比賽資訊 / Game Info】
 - 聯盟 League: ${league}
 - 日期 Date: ${date}
-- 球場 Stadium: ${location}
+- 球場 Stadium: ${resolvedLocation ?? "N/A"}
 - 對戰 Matchup: ${teamA} vs ${teamB}
 
 【數據摘要 / Data Summary】
@@ -107,7 +116,7 @@ ${statsBundle.text}
 {
   "teamA": "${teamA}",
   "teamB": "${teamB}",
-  "location": "${location}",
+  "location": ${resolvedLocation ? `"${resolvedLocation}"` : "null"},
   "prediction": "例如 \\"${teamA} 4 - 6 ${teamB}\\"（務必含兩隊名稱與比分）",
   "winRate": { "teamA": 百分比數字, "teamB": 百分比數字 },
   "summaryZh": "中文摘要：整季戰績、近期表現、近三場交手、先發投手對位與影響、傷兵名單影響、球場因素，最後簡短結論。",
@@ -170,7 +179,8 @@ ${statsBundle.text}
       }
     }
 
-    return res.json(heuristicFallback({ teamA, teamB, location }));
+    // 理論上不會到這，但保底
+    return res.json(heuristicFallback({ teamA, teamB, location: resolvedLocation }));
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Prediction failed", message: err.message });

@@ -1,21 +1,62 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+// CPBL 中文隊名
 const CPBL_TEAMS = ["富邦悍將", "統一獅", "中信兄弟", "樂天桃猿", "味全龍", "台鋼雄鷹"];
 
+// MLB 英中對照（30 隊）
+const MLB_ZH = {
+  "Arizona Diamondbacks": "亞歷桑那響尾蛇",
+  "Atlanta Braves": "亞特蘭大勇士",
+  "Baltimore Orioles": "巴爾的摩金鶯",
+  "Boston Red Sox": "波士頓紅襪",
+  "Chicago Cubs": "芝加哥小熊",
+  "Chicago White Sox": "芝加哥白襪",
+  "Cincinnati Reds": "辛辛那提紅人",
+  "Cleveland Guardians": "克里夫蘭守護者",
+  "Colorado Rockies": "科羅拉多落磯",
+  "Detroit Tigers": "底特律老虎",
+  "Houston Astros": "休士頓太空人",
+  "Kansas City Royals": "堪薩斯市皇家",
+  "Los Angeles Angels": "洛杉磯天使",
+  "Los Angeles Dodgers": "洛杉磯道奇",
+  "Miami Marlins": "邁阿密馬林魚",
+  "Milwaukee Brewers": "密爾瓦基釀酒人",
+  "Minnesota Twins": "明尼蘇達雙城",
+  "New York Mets": "紐約大都會",
+  "New York Yankees": "紐約洋基",
+  "Oakland Athletics": "奧克蘭運動家",
+  "Philadelphia Phillies": "費城費城人",
+  "Pittsburgh Pirates": "匹茲堡海盜",
+  "San Diego Padres": "聖地牙哥教士",
+  "San Francisco Giants": "舊金山巨人",
+  "Seattle Mariners": "西雅圖水手",
+  "St. Louis Cardinals": "聖路易紅雀",
+  "Tampa Bay Rays": "坦帕灣光芒",
+  "Texas Rangers": "德州遊騎兵",
+  "Toronto Blue Jays": "多倫多藍鳥",
+  "Washington Nationals": "華盛頓國民"
+};
+
 function TeamSelect({ league, label, value, onChange, mlbTeams, disabled }) {
-  const options = league === "MLB" ? mlbTeams : CPBL_TEAMS.map(n => ({ id: n, name: n }));
+  const options =
+    league === "MLB"
+      ? mlbTeams
+      : CPBL_TEAMS.map((n) => ({ id: n, name: n, label: n }));
+
   return (
     <div className="flex flex-col gap-1">
-      <label className="text-sm text-gray-600">{label}</label>
+      <label className="text-sm text-gray-700 font-medium">{label}</label>
       <select
-        className="border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
+        className="border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled || !options.length}
       >
         <option value="">{league === "MLB" ? "Select MLB team…" : "選擇中職球隊…"}</option>
         {options.map((t) => (
-          <option key={t.id} value={t.name}>{t.name}</option>
+          <option key={t.id} value={t.name}>
+            {t.label || t.name}
+          </option>
         ))}
       </select>
     </div>
@@ -27,12 +68,10 @@ export default function App() {
   const [teamA, setTeamA] = useState("");
   const [teamB, setTeamB] = useState("");
   const [date, setDate] = useState("");
-  const [location, setLocation] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // MLB teams
   const [mlbTeams, setMlbTeams] = useState([]);
   const [loadingTeams, setLoadingTeams] = useState(false);
 
@@ -42,9 +81,10 @@ export default function App() {
     return { min: `${yyyy - 1}-01-01`, max: `${yyyy + 1}-12-31` };
   }, []);
 
+  // 載入 MLB 隊伍並加入中文標籤
   useEffect(() => {
     setTeamA(""); setTeamB(""); setResult(null); setErr("");
-    if (league === "MLB" && mlbTeams.length === 0) {
+    if (league === "MLB") {
       (async () => {
         try {
           setLoadingTeams(true);
@@ -52,42 +92,49 @@ export default function App() {
           const data = await resp.json();
           const teams = (data?.teams || [])
             .filter((t) => t.active)
-            .map((t) => ({ id: t.id, name: `${t.name} / ${t.teamName}` })) // 中英混排（官方多為英文）
+            .map((t) => {
+              const zh = MLB_ZH[t.name] || t.name;
+              return { id: t.id, name: t.name, label: `${t.name}（${zh}）` };
+            })
             .sort((a, b) => a.name.localeCompare(b.name));
           setMlbTeams(teams);
-        } catch (e) {
-          console.error("Load MLB teams failed:", e);
+        } catch {
           setMlbTeams([]);
         } finally {
           setLoadingTeams(false);
         }
       })();
     }
-  }, [league]); // eslint-disable-line
+  }, [league]);
 
   const handlePredict = async () => {
     setErr(""); setResult(null);
-    if (!teamA || !teamB || !date || !location) {
-      setErr("請完整輸入：隊伍 A / 隊伍 B / 日期 / 球場  —  Please fill all fields.");
+
+    if (!league || !teamA || !teamB || !date) {
+      setErr("請完整輸入：聯盟 / 隊伍 A / 隊伍 B / 日期");
       return;
     }
     if (teamA === teamB) {
-      setErr("兩隊不可相同 / Teams must be different.");
+      setErr("兩隊不可相同");
       return;
     }
+
     setLoading(true);
     try {
       const res = await fetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, teamA, teamB, date, location }),
+        // location 不再由前端輸入；改由後端自動判定
+        body: JSON.stringify({ league, teamA, teamB, date })
       });
       const data = await res.json();
-      if (!res.ok) { setErr(data?.message || "預測失敗 / Prediction failed"); return; }
+      if (!res.ok) {
+        setErr(data?.message || "預測失敗（可能是日期/對戰不正確或沒有比賽）");
+        return;
+      }
       setResult(data);
-    } catch (e) {
-      console.error(e);
-      setErr("連線失敗 / Network error");
+    } catch {
+      setErr("連線失敗，請稍後再試");
     } finally {
       setLoading(false);
     }
@@ -95,17 +142,21 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gray-100">
-      <div className="w-full max-w-3xl">
-        {/* 表單卡片 */}
-        <div className="bg-white shadow-lg rounded-2xl p-6">
-          <h1 className="text-2xl font-bold mb-4">MLB / CPBL AI 比賽預測 · Game Predictor</h1>
+      <div className="w-full max-w-2xl bg-white shadow-xl rounded-2xl p-6">
+        <h1 className="text-2xl font-bold mb-1">MLB / CPBL AI 比賽預測</h1>
+        <p className="text-sm text-gray-500 mb-5">
+          Baseball Prediction（含季戰績・近況・對戰・先發投手・傷兵・球場自動判定）
+        </p>
 
+        {/* 表單卡片 */}
+        <div className="bg-white rounded-2xl border shadow-sm p-5 mb-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-600">聯盟 / League</label>
+              <label className="text-sm text-gray-700 font-medium">聯盟 / League</label>
               <select
-                className="border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
-                value={league} onChange={(e) => setLeague(e.target.value)}
+                className="border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
+                value={league}
+                onChange={(e) => setLeague(e.target.value)}
               >
                 <option value="MLB">美國職棒 MLB</option>
                 <option value="CPBL">中華職棒 CPBL</option>
@@ -130,33 +181,33 @@ export default function App() {
             />
 
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-600">日期 / Date</label>
+              <label className="text-sm text-gray-700 font-medium">日期 / Date</label>
               <input
                 type="date"
-                className="border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
+                className="border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
                 value={date}
                 onChange={(e) => setDate(e.target.value)}
-                min={dateLimits.min} max={dateLimits.max}
+                min={dateLimits.min}
+                max={dateLimits.max}
               />
             </div>
 
             <div className="flex flex-col gap-1">
-              <label className="text-sm text-gray-600">球場 / Stadium</label>
+              <label className="text-sm text-gray-700 font-medium">球場 / Stadium</label>
               <input
-                className="border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-black/20"
-                placeholder={league === "MLB" ? "Yankee Stadium" : "台南棒球場"}
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
+                className="border rounded-xl px-3 py-2 bg-gray-100 text-gray-600"
+                value={result?.location || "系統自動判定（依官方賽程）"}
+                readOnly
               />
             </div>
           </div>
 
           <button
-            className="mt-4 w-full bg-black text-white rounded-xl py-3 text-base font-medium disabled:opacity-60"
+            className="mt-4 w-full bg-black text-white rounded-xl py-2 disabled:opacity-60"
             onClick={handlePredict}
             disabled={loading || (league === "MLB" && loadingTeams)}
           >
-            {loading ? "預測中… / Predicting…" : "開始預測 / Predict"}
+            {loading ? "預測中…" : "開始預測 / Predict"}
           </button>
 
           {err && <p className="mt-3 text-red-600 text-sm">{err}</p>}
@@ -164,38 +215,36 @@ export default function App() {
 
         {/* 結果卡片 */}
         {result && (
-          <div className="mt-6 space-y-4">
-            <div className="bg-white rounded-2xl shadow border p-6">
+          <div className="space-y-4">
+            <div className="bg-white rounded-xl shadow border p-5">
               <p className="text-sm text-gray-500">Prediction / 預測比分</p>
               <p className="text-2xl font-semibold mt-1">{result.prediction}</p>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="bg-white rounded-2xl shadow border p-6">
+              <div className="bg-white rounded-xl shadow border p-5">
                 <p className="text-xs uppercase tracking-wide text-gray-500">Team A</p>
                 <p className="text-lg font-medium">{result.teamA}</p>
                 <p className="text-3xl font-bold mt-1">{result.winRate?.teamA}%</p>
               </div>
-              <div className="bg-white rounded-2xl shadow border p-6">
+              <div className="bg-white rounded-xl shadow border p-5">
                 <p className="text-xs uppercase tracking-wide text-gray-500">Team B</p>
                 <p className="text-lg font-medium">{result.teamB}</p>
                 <p className="text-3xl font-bold mt-1">{result.winRate?.teamB}%</p>
               </div>
             </div>
 
-            <div className="bg-white rounded-2xl shadow border p-6">
+            <div className="bg-white rounded-xl shadow border p-5">
               <p className="text-sm text-gray-500">中文重點 / Chinese Summary</p>
-              <p className="mt-1 leading-relaxed">{result.summaryZh}</p>
+              <p className="mt-1 leading-relaxed whitespace-pre-line">{result.summaryZh}</p>
             </div>
 
-            <div className="bg-white rounded-2xl shadow border p-6">
+            <div className="bg-white rounded-xl shadow border p-5">
               <p className="text-sm text-gray-500">English Summary</p>
-              <p className="mt-1 leading-relaxed">{result.summaryEn}</p>
+              <p className="mt-1 leading-relaxed whitespace-pre-line">{result.summaryEn}</p>
             </div>
 
-            <p className="text-xs text-gray-500">
-              ※ MLB 隊名來自官方清單；CPBL 請從下拉選擇六隊之一。
-            </p>
+            <p className="text-xs text-gray-400">※ 球場/先發/傷兵由系統自動判定；若官方資料無對應賽事，將不產生預測。</p>
           </div>
         )}
       </div>

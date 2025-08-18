@@ -141,11 +141,10 @@ async function mlbProbables({ aId, bId, dateISO }) {
   };
 }
 
-/** 傷兵（暫無穩定公開端點；保留空陣列，未來可替換） */
-async function mlbInjuries(_teamId) { return []; }
+/** 傷兵（暫無穩定公開端點；保留空陣列。之後有來源再補） */
+async function mlbInjuries(_) { return []; }
 
-/** MLB 彙整（提供文字摘要+先發/傷兵對到 Team A/B） */
-async function buildMLBStats({ teamA, teamB, date, location }) {
+async function buildMLBStats({ teamA, teamB, date }) {
   const iso = toISO(date);
   const season = iso.slice(0, 4);
   const A = await mlbFindTeamIdByName(teamA, season);
@@ -162,14 +161,19 @@ async function buildMLBStats({ teamA, teamB, date, location }) {
     mlbInjuries(B.id)
   ]);
 
-  // 對到 Team A / Team B 的 probable 投手
-  let pitcherA = "未定", pitcherB = "未定";
-  if (probables.homeTeamId && probables.awayTeamId) {
-    if (probables.homeTeamId === A.id) { pitcherA = probables.home || "未定"; pitcherB = probables.away || "未定"; }
-    else if (probables.awayTeamId === A.id) { pitcherA = probables.away || "未定"; pitcherB = probables.home || "未定"; }
+  // 沒有排到該兩隊對戰 → 當天無賽（或非彼此對戰）
+  if (!probables.homeTeamId || !probables.awayTeamId) {
+    const err = new Error(`No scheduled MLB game for ${teamA} vs ${teamB} on ${iso}.`);
+    err.status = 400;
+    throw err;
   }
 
-  const venueStr = location || probables.venue || "";
+  // 對到 Team A / Team B 的 probable 投手
+  let pitcherA = "未定", pitcherB = "未定";
+  if (probables.homeTeamId === A.id) { pitcherA = probables.home || "未定"; pitcherB = probables.away || "未定"; }
+  else if (probables.awayTeamId === A.id) { pitcherA = probables.away || "未定"; pitcherB = probables.home || "未定"; }
+
+  const venueStr = probables.venue || null;
 
   const text = [
     `MLB 真實資料（Stats API）`,
@@ -183,12 +187,14 @@ async function buildMLBStats({ teamA, teamB, date, location }) {
 
   return {
     text,
+    location: venueStr,
     pitchersByTeam: { [teamA]: pitcherA, [teamB]: pitcherB },
     injuriesByTeam: { [teamA]: aInj, [teamB]: bInj },
   };
 }
 
 /* ───── CPBL ───── */
+/** 備註：cpbl-opendata 沒提供逐日賽程/先發，這裡僅回傳整季戰績；球場/先發/傷兵暫無。 */
 const CPBL_STANDINGS =
   "https://raw.githubusercontent.com/ldkrsi/cpbl-opendata/master/CPBL/standings.csv";
 
@@ -231,7 +237,7 @@ async function cpblTeamStanding(teamZh) {
   };
 }
 
-async function buildCPBLStats({ teamA, teamB, date, location }) {
+async function buildCPBLStats({ teamA, teamB }) {
   const aZh = CPBL_NAME_MAP.get(norm(teamA));
   const bZh = CPBL_NAME_MAP.get(norm(teamB));
   if (!aZh || !bZh) {
@@ -251,20 +257,25 @@ async function buildCPBLStats({ teamA, teamB, date, location }) {
   const text = [
     `CPBL 真實資料（opendata standings.csv）`,
     aLine, bLine,
-    location ? `球場：${location}` : ``,
-  ].filter(Boolean).join("\n");
+    `球場：暫無資料（當日賽程來源未接）`,
+    `先發投手：未定`,
+    `傷兵：暫無來源`
+  ].join("\n");
 
   return {
     text,
+    location: null,
     pitchersByTeam: { [teamA]: "未定", [teamB]: "未定" },
-    injuriesByTeam: { [teamA]: [], [teamB]: [] }
+    injuriesByTeam: { [teamA]: [], [teamB]: [] },
   };
 }
 
 /* ───── 統一出口 ───── */
-export async function buildStats({ league, teamA, teamB, date, location }) {
+export async function buildStats({ league, teamA, teamB, date }) {
   const lg = String(league || "").toUpperCase();
-  if (lg === "MLB") return buildMLBStats({ teamA, teamB, date, location });
-  if (lg === "CPBL") return buildCPBLStats({ teamA, teamB, date, location });
-  return { text: `${teamA} vs ${teamB}${location ? ` @ ${location}` : ""}`, pitchersByTeam: {}, injuriesByTeam: {} };
+  if (lg === "MLB") return buildMLBStats({ teamA, teamB, date });
+  if (lg === "CPBL") return buildCPBLStats({ teamA, teamB, date });
+  const err = new Error(`Unsupported league: ${league}`);
+  err.status = 400;
+  throw err;
 }
