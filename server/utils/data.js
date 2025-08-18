@@ -1,5 +1,6 @@
 // server/utils/data.js
 // Node 18+ 內建 fetch，無需 node-fetch
+import { scrapeCPBLSchedule } from "./cpbl.js";
 
 /* ───── 共用 ───── */
 const MLB_API = "https://statsapi.mlb.com/api/v1";
@@ -141,7 +142,7 @@ async function mlbProbables({ aId, bId, dateISO }) {
   };
 }
 
-/** 傷兵（暫無穩定公開端點；保留空陣列。之後有來源再補） */
+/** 傷兵（暫無穩定公開端點；保留空陣列） */
 async function mlbInjuries(_) { return []; }
 
 async function buildMLBStats({ teamA, teamB, date }) {
@@ -161,14 +162,12 @@ async function buildMLBStats({ teamA, teamB, date }) {
     mlbInjuries(B.id)
   ]);
 
-  // 沒有排到該兩隊對戰 → 當天無賽（或非彼此對戰）
   if (!probables.homeTeamId || !probables.awayTeamId) {
     const err = new Error(`No scheduled MLB game for ${teamA} vs ${teamB} on ${iso}.`);
     err.status = 400;
     throw err;
   }
 
-  // 對到 Team A / Team B 的 probable 投手
   let pitcherA = "未定", pitcherB = "未定";
   if (probables.homeTeamId === A.id) { pitcherA = probables.home || "未定"; pitcherB = probables.away || "未定"; }
   else if (probables.awayTeamId === A.id) { pitcherA = probables.away || "未定"; pitcherB = probables.home || "未定"; }
@@ -194,7 +193,7 @@ async function buildMLBStats({ teamA, teamB, date }) {
 }
 
 /* ───── CPBL ───── */
-/** 備註：cpbl-opendata 沒提供逐日賽程/先發，這裡僅回傳整季戰績；球場/先發/傷兵暫無。 */
+// 備註：opendata 仍提供整季戰績；但球場/先發改由爬官網補足（若抓不到就視為當日無賽或無資料）
 const CPBL_STANDINGS =
   "https://raw.githubusercontent.com/ldkrsi/cpbl-opendata/master/CPBL/standings.csv";
 
@@ -237,7 +236,7 @@ async function cpblTeamStanding(teamZh) {
   };
 }
 
-async function buildCPBLStats({ teamA, teamB }) {
+async function buildCPBLStats({ teamA, teamB, date }) {
   const aZh = CPBL_NAME_MAP.get(norm(teamA));
   const bZh = CPBL_NAME_MAP.get(norm(teamB));
   if (!aZh || !bZh) {
@@ -246,6 +245,18 @@ async function buildCPBLStats({ teamA, teamB }) {
     err.status = 400;
     throw err;
   }
+
+  const iso = toISO(date);
+
+  // 1) 官網爬取：必須抓到「當日這兩隊對戰的卡片」，否則回 400（不出預測）
+  const scraped = await scrapeCPBLSchedule({ dateISO: iso, teamA: aZh, teamB: bZh });
+  if (!scraped) {
+    const err = new Error(`CPBL 官網未找到 ${iso} 的 ${aZh} vs ${bZh} 對戰或資料。`);
+    err.status = 400;
+    throw err;
+  }
+
+  // 2) opendata：整季戰績（顯示於摘要）
   const [aS, bS] = await Promise.all([cpblTeamStanding(aZh), cpblTeamStanding(bZh)]);
   const aLine = aS
     ? `${aZh} 整季（${aS.year}）：${aS.wins}-${aS.losses}${aS.ties ? "-" + aS.ties : ""}；總得 ${aS.rs}、總失 ${aS.ra}（場均得 ${(aS.rs/Math.max(1,aS.games)).toFixed(1)}、場均失 ${(aS.ra/Math.max(1,aS.games)).toFixed(1)}）`
@@ -255,18 +266,17 @@ async function buildCPBLStats({ teamA, teamB }) {
     : `${bZh}：找不到年度戰績`;
 
   const text = [
-    `CPBL 真實資料（opendata standings.csv）`,
+    `CPBL 官網 + opendata`,
     aLine, bLine,
-    `球場：暫無資料（當日賽程來源未接）`,
-    `先發投手：未定`,
-    `傷兵：暫無來源`
+    `球場：${scraped.venue || "未提供"}`,
+    `先發投手：${aZh}：${scraped.pitcherA || "未定"}；${bZh}：${scraped.pitcherB || "未定"}`
   ].join("\n");
 
   return {
     text,
-    location: null,
-    pitchersByTeam: { [teamA]: "未定", [teamB]: "未定" },
-    injuriesByTeam: { [teamA]: [], [teamB]: [] },
+    location: scraped.venue || null,
+    pitchersByTeam: { [teamA]: scraped.pitcherA || "未定", [teamB]: scraped.pitcherB || "未定" },
+    injuriesByTeam: { [teamA]: [], [teamB]: [] }, // 官網傷兵無穩定欄位，先留空
   };
 }
 
