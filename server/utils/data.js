@@ -1,15 +1,15 @@
 // server/utils/data.js
 // Node 18+ 內建 fetch，無需 node-fetch
 
-/* ========== 共用工具 ========== */
+/* ───── 共用 ───── */
 const MLB_API = "https://statsapi.mlb.com/api/v1";
 
 const pad = (n) => String(n).padStart(2, "0");
 const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const toISO = (s) => (s.includes("/") ? s.replace(/\//g, "-") : s);
+const toISO = (s) => (s?.includes("/") ? s.replace(/\//g, "-") : s);
 const norm = (s) => String(s || "").toLowerCase().trim();
 
-/* in-memory 簡易快取（重啟會清空） */
+/* 極簡快取（重啟即清） */
 const CACHE = new Map();
 async function cacheGet(key, ttlMs, fetcher) {
   const now = Date.now();
@@ -34,7 +34,7 @@ async function getText(url, ttlMs = 6 * 60 * 60 * 1000) {
   });
 }
 
-/* ========== MLB ========== */
+/* ───── MLB ───── */
 function nameLike(a, b) {
   const A = norm(a), B = norm(b);
   return A === B || A.includes(B) || B.includes(A);
@@ -56,10 +56,31 @@ async function mlbFindTeamIdByName(name, season) {
   }
   return { id: hit.id, name: hit.name };
 }
+
+/** 整季戰績（季初至指定日） */
+async function mlbSeasonRecord(teamId, dateISO) {
+  const end = new Date(dateISO);
+  const seasonStart = new Date(end.getFullYear(), 2, 1); // 3/1 起
+  const data = await getJSON(
+    `${MLB_API}/schedule?sportId=1&teamId=${teamId}&startDate=${ymd(seasonStart)}&endDate=${ymd(end)}`
+  );
+  const games = (data?.dates || []).flatMap((d) => d.games || []).filter((g) => g.status?.codedGameState === "F");
+  let w = 0, l = 0, t = 0, rs = 0, ra = 0;
+  for (const g of games) {
+    const home = g.teams.home, away = g.teams.away;
+    const isHome = String(home.team.id) === String(teamId);
+    const us = isHome ? home : away, opp = isHome ? away : home;
+    const usR = Number(us.score || 0), oppR = Number(opp.score || 0);
+    rs += usR; ra += oppR;
+    if (usR > oppR) w++; else if (usR < oppR) l++; else t++;
+  }
+  return { games: games.length, wins: w, losses: l, ties: t, rs, ra };
+}
+
+/** 近期戰績（近 N 場） */
 async function mlbRecent(teamId, dateISO, n = 5) {
   const end = new Date(dateISO);
-  const from = new Date(end);
-  from.setDate(from.getDate() - 20);
+  const from = new Date(end); from.setDate(from.getDate() - 20);
   const data = await getJSON(
     `${MLB_API}/schedule?sportId=1&teamId=${teamId}&startDate=${ymd(from)}&endDate=${ymd(end)}`
   );
@@ -76,10 +97,11 @@ async function mlbRecent(teamId, dateISO, n = 5) {
   }
   return { games: last.length, w, l, ppgFor: last.length ? rf / last.length : 0, ppgAgainst: last.length ? ra / last.length : 0 };
 }
+
+/** 近 3 場對戰 */
 async function mlbH2HLast3(aId, bId, dateISO) {
   const end = new Date(dateISO);
-  const start = new Date(end);
-  start.setDate(start.getDate() - 120);
+  const start = new Date(end); start.setDate(start.getDate() - 120);
   const data = await getJSON(
     `${MLB_API}/schedule?sportId=1&teamId=${aId}&startDate=${ymd(start)}&endDate=${ymd(end)}`
   );
@@ -98,29 +120,75 @@ async function mlbH2HLast3(aId, bId, dateISO) {
   }
   return { count: last3.length, aWins, bWins };
 }
+
+/** 指定日 probable 先發投手 + 場地（含主客隊 id） */
+async function mlbProbables({ aId, bId, dateISO }) {
+  const data = await getJSON(`${MLB_API}/schedule?sportId=1&teamId=${aId}&date=${dateISO}`, 30_000);
+  const games = (data?.dates?.[0]?.games || []).filter((g) => {
+    const h = g.teams?.home?.team?.id, a = g.teams?.away?.team?.id;
+    return (h === aId && a === bId) || (h === bId && a === aId);
+  });
+  const g = games[0];
+  if (!g) return { venue: null, homeTeamId: null, awayTeamId: null, home: null, away: null };
+  const pHome = g?.probablePitchers?.home?.fullName || g?.probablePitchers?.home?.name;
+  const pAway = g?.probablePitchers?.away?.fullName || g?.probablePitchers?.away?.name;
+  return {
+    venue: g?.venue?.name || null,
+    homeTeamId: g?.teams?.home?.team?.id || null,
+    awayTeamId: g?.teams?.away?.team?.id || null,
+    home: pHome || null,
+    away: pAway || null
+  };
+}
+
+/** 傷兵（暫無穩定公開端點；保留空陣列，未來可替換） */
+async function mlbInjuries(_teamId) { return []; }
+
+/** MLB 彙整（提供文字摘要+先發/傷兵對到 Team A/B） */
 async function buildMLBStats({ teamA, teamB, date, location }) {
   const iso = toISO(date);
   const season = iso.slice(0, 4);
   const A = await mlbFindTeamIdByName(teamA, season);
   const B = await mlbFindTeamIdByName(teamB, season);
 
-  const [aR, bR, h2h] = await Promise.all([
+  const [aSeason, bSeason, aRecent, bRecent, h2h, probables, aInj, bInj] = await Promise.all([
+    mlbSeasonRecord(A.id, iso),
+    mlbSeasonRecord(B.id, iso),
     mlbRecent(A.id, iso, 5),
     mlbRecent(B.id, iso, 5),
     mlbH2HLast3(A.id, B.id, iso),
+    mlbProbables({ aId: A.id, bId: B.id, dateISO: iso }),
+    mlbInjuries(A.id),
+    mlbInjuries(B.id)
   ]);
 
-  return [
+  // 對到 Team A / Team B 的 probable 投手
+  let pitcherA = "未定", pitcherB = "未定";
+  if (probables.homeTeamId && probables.awayTeamId) {
+    if (probables.homeTeamId === A.id) { pitcherA = probables.home || "未定"; pitcherB = probables.away || "未定"; }
+    else if (probables.awayTeamId === A.id) { pitcherA = probables.away || "未定"; pitcherB = probables.home || "未定"; }
+  }
+
+  const venueStr = location || probables.venue || "";
+
+  const text = [
     `MLB 真實資料（Stats API）`,
-    `${teamA} 最近 5 場：${aR.w}-${aR.l}，場均得分 ${aR.ppgFor.toFixed(1)}，失分 ${aR.ppgAgainst.toFixed(1)}`,
-    `${teamB} 最近 5 場：${bR.w}-${bR.l}，場均得分 ${bR.ppgFor.toFixed(1)}，失分 ${bR.ppgAgainst.toFixed(1)}`,
-    `近期交手：近 ${h2h.count} 場 ${teamA} ${h2h.aWins} 勝、${teamB} ${h2h.bWins} 勝`,
-    location ? `球場：${location}` : ``,
+    `${teamA} 整季：${aSeason.wins}-${aSeason.losses}${aSeason.ties ? "-" + aSeason.ties : ""}（${season}），總得 ${aSeason.rs}、總失 ${aSeason.ra}`,
+    `${teamB} 整季：${bSeason.wins}-${bSeason.losses}${bSeason.ties ? "-" + bSeason.ties : ""}（${season}），總得 ${bSeason.rs}、總失 ${bSeason.ra}`,
+    `${teamA} 近 5 場：${aRecent.w}-${aRecent.l}，場均得 ${aRecent.ppgFor.toFixed(1)}、失 ${aRecent.ppgAgainst.toFixed(1)}`,
+    `${teamB} 近 5 場：${bRecent.w}-${bRecent.l}，場均得 ${bRecent.ppgFor.toFixed(1)}、失 ${bRecent.ppgAgainst.toFixed(1)}`,
+    `近 3 場交手：${teamA} ${h2h.aWins} 勝，${teamB} ${h2h.bWins} 勝`,
+    venueStr ? `球場：${venueStr}` : ``,
   ].filter(Boolean).join("\n");
+
+  return {
+    text,
+    pitchersByTeam: { [teamA]: pitcherA, [teamB]: pitcherB },
+    injuriesByTeam: { [teamA]: aInj, [teamB]: bInj },
+  };
 }
 
-/* ========== CPBL ========== */
-// 年度戰績（ldkrsi/cpbl-opendata）
+/* ───── CPBL ───── */
 const CPBL_STANDINGS =
   "https://raw.githubusercontent.com/ldkrsi/cpbl-opendata/master/CPBL/standings.csv";
 
@@ -132,6 +200,7 @@ const CPBL_NAME_MAP = new Map([
   ["味全龍","味全龍"],["weichuan dragons","味全龍"],["dragons","味全龍"],
   ["台鋼雄鷹","台鋼雄鷹"],["tsg hawks","台鋼雄鷹"],["hawks","台鋼雄鷹"],["tsg","台鋼雄鷹"],
 ]);
+
 function parseCSV(text) {
   const lines = text.split(/\r?\n/).filter(Boolean);
   const header = lines.shift().split(",");
@@ -142,6 +211,7 @@ function parseCSV(text) {
     return row;
   });
 }
+
 async function cpblTeamStanding(teamZh) {
   const raw = await getText(CPBL_STANDINGS);
   const rows = parseCSV(raw);
@@ -160,6 +230,7 @@ async function cpblTeamStanding(teamZh) {
     ra: Number(r.RA || 0),
   };
 }
+
 async function buildCPBLStats({ teamA, teamB, date, location }) {
   const aZh = CPBL_NAME_MAP.get(norm(teamA));
   const bZh = CPBL_NAME_MAP.get(norm(teamB));
@@ -171,24 +242,29 @@ async function buildCPBLStats({ teamA, teamB, date, location }) {
   }
   const [aS, bS] = await Promise.all([cpblTeamStanding(aZh), cpblTeamStanding(bZh)]);
   const aLine = aS
-    ? `${aZh}（${aS.year} 季）：${aS.wins}-${aS.losses}${aS.ties ? "-" + aS.ties : ""}，勝率 ${aS.wpct ?? "—"}，得 ${aS.rs}、失 ${aS.ra}（場均得分 ${(aS.rs/Math.max(1,aS.games)).toFixed(1)}、場均失分 ${(aS.ra/Math.max(1,aS.games)).toFixed(1)}）`
+    ? `${aZh} 整季（${aS.year}）：${aS.wins}-${aS.losses}${aS.ties ? "-" + aS.ties : ""}；總得 ${aS.rs}、總失 ${aS.ra}（場均得 ${(aS.rs/Math.max(1,aS.games)).toFixed(1)}、場均失 ${(aS.ra/Math.max(1,aS.games)).toFixed(1)}）`
     : `${aZh}：找不到年度戰績`;
   const bLine = bS
-    ? `${bZh}（${bS.year} 季）：${bS.wins}-${bS.losses}${bS.ties ? "-" + bS.ties : ""}，勝率 ${bS.wpct ?? "—"}，得 ${bS.rs}、失 ${bS.ra}（場均得分 ${(bS.rs/Math.max(1,bS.games)).toFixed(1)}、場均失分 ${(bS.ra/Math.max(1,bS.games)).toFixed(1)}）`
+    ? `${bZh} 整季（${bS.year}）：${bS.wins}-${bS.losses}${bS.ties ? "-" + bS.ties : ""}；總得 ${bS.rs}、總失 ${bS.ra}（場均得 ${(bS.rs/Math.max(1,bS.games)).toFixed(1)}、場均失 ${(bS.ra/Math.max(1,bS.games)).toFixed(1)}）`
     : `${bZh}：找不到年度戰績`;
 
-  return [
+  const text = [
     `CPBL 真實資料（opendata standings.csv）`,
-    aLine,
-    bLine,
+    aLine, bLine,
     location ? `球場：${location}` : ``,
   ].filter(Boolean).join("\n");
+
+  return {
+    text,
+    pitchersByTeam: { [teamA]: "未定", [teamB]: "未定" },
+    injuriesByTeam: { [teamA]: [], [teamB]: [] }
+  };
 }
 
-/* ========== 統一出口（server 會呼叫這個） ========== */
+/* ───── 統一出口 ───── */
 export async function buildStats({ league, teamA, teamB, date, location }) {
   const lg = String(league || "").toUpperCase();
   if (lg === "MLB") return buildMLBStats({ teamA, teamB, date, location });
   if (lg === "CPBL") return buildCPBLStats({ teamA, teamB, date, location });
-  return `${teamA} vs ${teamB}${location ? ` @ ${location}` : ""}`;
+  return { text: `${teamA} vs ${teamB}${location ? ` @ ${location}` : ""}`, pitchersByTeam: {}, injuriesByTeam: {} };
 }

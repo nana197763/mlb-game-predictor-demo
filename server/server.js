@@ -12,7 +12,6 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// ───────────────── middleware ─────────────────
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
@@ -25,10 +24,9 @@ const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
 app.use(express.static(publicDir));
 
-// 健康檢查
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// ───────────────── utilities ─────────────────
+/* ───── Utils ───── */
 function safeParseModelJSON(text) {
   try {
     const match = text.match(/\{[\s\S]*\}/);
@@ -38,18 +36,14 @@ function safeParseModelJSON(text) {
     return null;
   }
 }
-
 function heuristicFallback({ teamA, teamB, location }) {
-  const baseA = 45;
-  const baseB = 55;
+  const baseA = 45, baseB = 55;
   const adj = location?.toLowerCase?.().includes(teamB.toLowerCase()) ? 3 : 0;
   const teamAPct = Math.max(0, Math.min(100, baseA - adj));
   const teamBPct = Math.max(0, Math.min(100, baseB + adj));
   const pred = `${teamA} 4 - 5 ${teamB}`;
   return {
-    teamA,
-    teamB,
-    location,
+    teamA, teamB, location,
     prediction: pred,
     winRate: { teamA: teamAPct, teamB: teamBPct },
     summaryZh: `（備援）依啟發式評估，${teamB} 小幅領先，預測 5-4 勝 ${teamA}`,
@@ -57,41 +51,28 @@ function heuristicFallback({ teamA, teamB, location }) {
   };
 }
 
-// ───────────────── route: predict ─────────────────
+/* ───── Predict ───── */
 app.post("/api/predict", async (req, res) => {
-  // 1) 驗證基本欄位
   const parsed = PredictRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.issues });
   }
 
-  const {
-    teamA,
-    teamB,
-    date,
-    location,
-    league = "MLB",
-    pitcherA,
-    pitcherB,
-    injuriesA = [],
-    injuriesB = []
-  } = parsed.data;
+  const { teamA, teamB, date, location, league = "MLB" } = parsed.data;
 
-  // 額外日期保護：允許 -1 年到 +1 年
-  const d = new Date(date);
-  const now = new Date();
+  // 日期 guard（-1 ~ +1 年）
+  const d = new Date(date), now = new Date();
   const min = new Date(now.getFullYear() - 1, 0, 1);
   const max = new Date(now.getFullYear() + 1, 11, 31);
   if (!(d >= min && d <= max)) {
     return res.status(400).json({ error: "Invalid input", message: "Date out of supported range." });
   }
 
-  // 2) 先取得真實資料（MLB/CPBL）
-  let stats;
+  // 取得真實資料（含：季戰績/近況/交手/球場/先發/傷兵）
+  let statsBundle;
   try {
-    stats = await buildStats({ league, teamA, teamB, date, location });
+    statsBundle = await buildStats({ league, teamA, teamB, date, location });
   } catch (err) {
-    // data.js 內對於未知隊名會丟 status=400
     if (err?.status === 400) {
       return res.status(400).json({ error: "Invalid input", message: err.message });
     }
@@ -99,41 +80,48 @@ app.post("/api/predict", async (req, res) => {
     return res.status(500).json({ error: "Data source failed", message: err.message });
   }
 
-  // 3) 組合 prompt（加入投手與傷兵）
+  const pitcherALine = statsBundle.pitchersByTeam?.[teamA] || "未定";
+  const pitcherBLine = statsBundle.pitchersByTeam?.[teamB] || "未定";
+  const injuriesALine = (statsBundle.injuriesByTeam?.[teamA] || []).join(", ") || "無";
+  const injuriesBLine = (statsBundle.injuriesByTeam?.[teamB] || []).join(", ") || "無";
+
   const userContent = `
-聯盟：${league}
-比賽日期：${date}
-球場：${location}
-對戰：${teamA} vs ${teamB}
+【比賽資訊 / Game Info】
+- 聯盟 League: ${league}
+- 日期 Date: ${date}
+- 球場 Stadium: ${location}
+- 對戰 Matchup: ${teamA} vs ${teamB}
 
-數據：
-${stats}
+【數據摘要 / Data Summary】
+${statsBundle.text}
 
-先發投手：
-- ${teamA} 先發投手：${pitcherA || "待定"}
-- ${teamB} 先發投手：${pitcherB || "待定"}
+【先發投手 / Probable Starters】
+- ${teamA}: ${pitcherALine}
+- ${teamB}: ${pitcherBLine}
 
-傷兵名單：
-- ${teamA} 傷兵：${Array.isArray(injuriesA) ? (injuriesA.join(", ") || "無") : "無"}
-- ${teamB} 傷兵：${Array.isArray(injuriesB) ? (injuriesB.join(", ") || "無") : "無"}
+【傷兵 / Injuries】
+- ${teamA}: ${injuriesALine}
+- ${teamB}: ${injuriesBLine}
 
-請只回覆 JSON（不得包含其他文字或註解），鍵名如下：
+請只回覆 JSON（不得包含任何多餘文字或程式碼圍欄）。格式如下：
 {
   "teamA": "${teamA}",
   "teamB": "${teamB}",
   "location": "${location}",
-  "prediction": "例如 \\"${teamA} 4 - 6 ${teamB}\\"，務必包含兩隊名稱與比分",
+  "prediction": "例如 \\"${teamA} 4 - 6 ${teamB}\\"（務必含兩隊名稱與比分）",
   "winRate": { "teamA": 百分比數字, "teamB": 百分比數字 },
-  "summaryZh": "用中文的簡短預測重點（含原因，如投手對決、近況、傷兵）",
-  "summaryEn": "English one-liner summary"
+  "summaryZh": "中文摘要：整季戰績、近期表現、近三場交手、先發投手對位與影響、傷兵名單影響、球場因素，最後簡短結論。",
+  "summaryEn": "English summary covering season record, recent form, last H2H, probable starters impact, injuries, venue, and conclusion."
 }
-注意：winRate 兩邊加總需≈100（允許±0.5 誤差）。`.trim();
+要求：
+- 勝率兩隊加總≈100（允許±0.5）；
+- 比分須合理（棒球常見 2–7 分），並與投手/近況一致；
+- 嚴格 JSON，鍵名與型別須符合；`.trim();
 
   try {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
 
-    // Node 18+ 有內建 fetch
     const resp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -149,7 +137,7 @@ ${stats}
           {
             role: "system",
             content:
-              "You are a disciplined baseball prediction analyst. Always return STRICT JSON only. Use provided per-game scoring and allowing, recent form, head-to-head, venue and pitchers/injury info to estimate a plausible baseball score."
+              "You are a disciplined baseball prediction analyst. Always return STRICT JSON only. Use season record, recent form, last H2H, venue, probable starters and injuries to estimate a plausible score and win rates."
           },
           { role: "user", content: userContent }
         ]
@@ -166,7 +154,7 @@ ${stats}
     let parsedJSON = safeParseModelJSON(raw);
 
     if (parsedJSON) {
-      // 讓勝率加總 ≈ 100
+      // 勝率加總 ≈ 100
       if (parsedJSON?.winRate) {
         const a = Number(parsedJSON.winRate.teamA) || 0;
         const b = Number(parsedJSON.winRate.teamB) || 0;
@@ -178,12 +166,10 @@ ${stats}
       }
       const validated = PredictResponseSchema.safeParse(parsedJSON);
       if (validated.success) {
-        console.log("[predict] using MODEL response");
         return res.json(validated.data);
       }
     }
 
-    console.warn("[predict] using FALLBACK");
     return res.json(heuristicFallback({ teamA, teamB, location }));
   } catch (err) {
     console.error(err);
@@ -191,7 +177,7 @@ ${stats}
   }
 });
 
-// SPA fallback（放在最後，避免吃掉 /api/*）
+// SPA fallback（避免吃掉 /api/*）
 app.get("*", (req, res, next) => {
   if (req.path.startsWith("/api")) return next();
   return res.sendFile(path.join(publicDir, "index.html"));
