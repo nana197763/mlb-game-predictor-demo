@@ -81,3 +81,5 @@ export function calculateWinRate({ teamA, teamB, stats }) {
 
   return result;
 }
+export { calculateWinRate as predictWinRate };
+
