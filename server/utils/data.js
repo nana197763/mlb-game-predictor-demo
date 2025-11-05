@@ -1,7 +1,6 @@
 // server/utils/data.js
-import { scrapeCPBLSchedule } from "./cpbl.js";
+import { scrapeCPBLSchedule, buildCPBLStats } from "./cpbl.js";
 import { buildMLBStats } from "./mlb.js";
-import { buildCPBLStats } from "./cpbl.js";
 
 /* ───── 工具 ───── */
 const pad = (n) => String(n).padStart(2, "0");
