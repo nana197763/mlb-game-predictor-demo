@@ -81,3 +81,14 @@ app.get("*", (req, res, next) => {
 app.listen(PORT, () => {
   console.log(`✅ API listening on http://localhost:${PORT}`);
 });
+export async function buildStats({ league, ...rest }) {
+  if (league === "MLB") {
+    return await buildMLBStats(rest);
+  } else if (league === "CPBL") {
+    return await buildCPBLStats(rest);
+  } else {
+    const err = new Error(`Unsupported league: ${league}`);
+    err.status = 400;
+    throw err;
+  }
+}
