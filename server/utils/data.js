@@ -86,3 +86,10 @@ export async function buildStats({ league, teamA, teamB, date }) {
   err.status = 400;
   throw err;
 }
+// server/utils/data.js 最後一行（或最後 export 區塊）
+
+export {
+  buildStats,
+  buildMLBStats,
+  buildCPBLStats
+};
