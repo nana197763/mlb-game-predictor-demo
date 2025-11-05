@@ -77,17 +77,6 @@ function calculateWinRates({ teamA, teamB, stats }) {
 }
 
 /* ───── 匯出 ───── */
-export { calculateWinRates };
-export async function buildStats({ league, teamA, teamB, date }) {
-  const lg = String(league || "").toUpperCase();
-  if (lg === "MLB") return buildMLBStats({ teamA, teamB, date });
-  if (lg === "CPBL") return buildCPBLStats({ teamA, teamB, date });
-  const err = new Error(`Unsupported league: ${league}`);
-  err.status = 400;
-  throw err;
-}
-// server/utils/data.js 最後一行（或最後 export 區塊）
-
 export {
   buildStats,
   buildMLBStats,
