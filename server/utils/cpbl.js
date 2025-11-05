@@ -35,3 +35,4 @@ export async function buildCPBLStats({ teamA, teamB, date }) {
     text: `CPBL 比賽資料：${teamA} vs ${teamB}，球場 ${schedule?.venue || "未知"}。`,
   };
 }
+export { scrapeCPBLSchedule };
