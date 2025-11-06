@@ -28,48 +28,27 @@ app.use(express.static(publicDir));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.post("/api/predict", async (req, res) => {
-  const parsed = PredictRequestSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid request", details: parsed.error.issues });
-  }
-
-  const { teamA, teamB, date, league = "MLB" } = parsed.data;
-  if (!league || !teamA || !teamB || !date) {
-    return res.status(400).json({ error: "Invalid input", message: "需要聯盟、隊伍 A、隊伍 B、日期。" });
-  }
-  if (teamA === teamB) {
-    return res.status(400).json({ error: "Invalid input", message: "兩隊不可相同。" });
-  }
-
-  const d = new Date(date), now = new Date();
-  const min = new Date(now.getFullYear() - 1, 0, 1);
-  const max = new Date(now.getFullYear() + 1, 11, 31);
-  if (!(d >= min && d <= max)) {
-    return res.status(400).json({ error: "Invalid input", message: "日期超出支援範圍。" });
-  }
-
-  let statsBundle;
   try {
-    statsBundle = await buildStats({ league, teamA, teamB, date });
-  } catch (err) {
-    if (err?.status === 400) {
-      return res.status(400).json({ error: "Invalid input", message: err.message });
-    }
-    console.error("[predict] data source failure:", err);
-    return res.status(500).json({ error: "Data source failed", message: err.message });
-  }
+    const { league, teamA, teamB, date } = req.body;
 
-  try {
-    const result = predictWinRate({ teamA, teamB, league, date, stats: statsBundle });
-    const validated = PredictResponseSchema.safeParse(result);
-    if (!validated.success) {
-      console.error("Validation failed", validated.error);
-      return res.status(500).json({ error: "Invalid model result" });
-    }
-    return res.json(validated.data);
+    const stats = await buildStats({ league, teamA, teamB, date });
+    const winRate = calculateWinRates({ teamA, teamB, stats });
+
+    const prediction = `${teamA} vs ${teamB} - ${winRate[teamA]}% / ${winRate[teamB]}%`;
+    const summaryZh = `球場：${stats.location || "未知"}。\n${teamA} 勝率 ${winRate[teamA]}%，${teamB} 勝率 ${winRate[teamB]}%。`;
+    const summaryEn = `Stadium: ${stats.location || "Unknown"}.\n${teamA}: ${winRate[teamA]}% chance to win. ${teamB}: ${winRate[teamB]}%.`;
+
+    res.json({
+      teamA,
+      teamB,
+      prediction,
+      winRate: { teamA: winRate[teamA], teamB: winRate[teamB] },
+      location: stats.location,
+      summaryZh,
+      summaryEn,
+    });
   } catch (err) {
-    console.error("Prediction model failed", err);
-    return res.status(500).json({ error: "Prediction failed", message: err.message });
+    res.status(500).json({ message: err.message || "Server error" });
   }
 });
 

@@ -1,9 +1,21 @@
 import React, { useEffect, useMemo, useState } from "react";
 
+/* ──────── 聯盟隊伍設定 ──────── */
+
 // CPBL 中文隊名
 const CPBL_TEAMS = ["富邦悍將", "統一獅", "中信兄弟", "樂天桃猿", "味全龍", "台鋼雄鷹"];
 
-// MLB 英中對照（30 隊）
+// NBA 隊伍清單
+const NBA_TEAMS = [
+  "Atlanta Hawks", "Boston Celtics", "Brooklyn Nets", "Charlotte Hornets", "Chicago Bulls",
+  "Cleveland Cavaliers", "Dallas Mavericks", "Denver Nuggets", "Detroit Pistons", "Golden State Warriors",
+  "Houston Rockets", "Indiana Pacers", "Los Angeles Clippers", "Los Angeles Lakers", "Memphis Grizzlies",
+  "Miami Heat", "Milwaukee Bucks", "Minnesota Timberwolves", "New Orleans Pelicans", "New York Knicks",
+  "Oklahoma City Thunder", "Orlando Magic", "Philadelphia 76ers", "Phoenix Suns", "Portland Trail Blazers",
+  "Sacramento Kings", "San Antonio Spurs", "Toronto Raptors", "Utah Jazz", "Washington Wizards"
+];
+
+// MLB 英中對照
 const MLB_ZH = {
   "Arizona Diamondbacks": "亞歷桑那響尾蛇",
   "Atlanta Braves": "亞特蘭大勇士",
@@ -37,11 +49,16 @@ const MLB_ZH = {
   "Washington Nationals": "華盛頓國民"
 };
 
+/* ──────── 隊伍下拉選單元件 ──────── */
 function TeamSelect({ league, label, value, onChange, mlbTeams, disabled }) {
-  const options =
-    league === "MLB"
-      ? mlbTeams
-      : CPBL_TEAMS.map((n) => ({ id: n, name: n, label: n }));
+  let options = [];
+  if (league === "MLB") {
+    options = mlbTeams;
+  } else if (league === "CPBL") {
+    options = CPBL_TEAMS.map((n) => ({ id: n, name: n, label: n }));
+  } else if (league === "NBA") {
+    options = NBA_TEAMS.map((n) => ({ id: n, name: n, label: n }));
+  }
 
   return (
     <div className="flex flex-col gap-1">
@@ -52,7 +69,13 @@ function TeamSelect({ league, label, value, onChange, mlbTeams, disabled }) {
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled || !options.length}
       >
-        <option value="">{league === "MLB" ? "Select MLB team…" : "選擇中職球隊…"}</option>
+        <option value="">
+          {league === "MLB"
+            ? "Select MLB team…"
+            : league === "NBA"
+            ? "Select NBA team…"
+            : "選擇中職球隊…"}
+        </option>
         {options.map((t) => (
           <option key={t.id} value={t.name}>
             {t.label || t.name}
@@ -63,6 +86,7 @@ function TeamSelect({ league, label, value, onChange, mlbTeams, disabled }) {
   );
 }
 
+/* ──────── 主畫面 ──────── */
 export default function App() {
   const [league, setLeague] = useState("MLB");
   const [teamA, setTeamA] = useState("");
@@ -81,9 +105,13 @@ export default function App() {
     return { min: `${yyyy - 1}-01-01`, max: `${yyyy + 1}-12-31` };
   }, []);
 
-  // 載入 MLB 隊伍並加入中文標籤
+  // 聯盟切換時重置選項
   useEffect(() => {
-    setTeamA(""); setTeamB(""); setResult(null); setErr("");
+    setTeamA("");
+    setTeamB("");
+    setResult(null);
+    setErr("");
+
     if (league === "MLB") {
       (async () => {
         try {
@@ -104,11 +132,16 @@ export default function App() {
           setLoadingTeams(false);
         }
       })();
+    } else {
+      // 切換到 CPBL 或 NBA 時清空 MLB 隊伍
+      setMlbTeams([]);
     }
   }, [league]);
 
+  // 預測按鈕
   const handlePredict = async () => {
-    setErr(""); setResult(null);
+    setErr("");
+    setResult(null);
 
     if (!league || !teamA || !teamB || !date) {
       setErr("請完整輸入：聯盟 / 隊伍 A / 隊伍 B / 日期");
@@ -124,7 +157,6 @@ export default function App() {
       const res = await fetch("/api/predict", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // location 不再由前端輸入；改由後端自動判定
         body: JSON.stringify({ league, teamA, teamB, date })
       });
       const data = await res.json();
@@ -143,14 +175,15 @@ export default function App() {
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-gray-100">
       <div className="w-full max-w-2xl bg-white shadow-xl rounded-2xl p-6">
-        <h1 className="text-2xl font-bold mb-1">MLB / CPBL AI 比賽預測</h1>
+        <h1 className="text-2xl font-bold mb-1">MLB / CPBL / NBA AI 比賽預測</h1>
         <p className="text-sm text-gray-500 mb-5">
-          Baseball Prediction（含季戰績・近況・對戰・先發投手・傷兵・球場自動判定）
+          Prediction（含季戰績・近況・對戰・球員狀態・球場自動判定）
         </p>
 
-        {/* 表單卡片 */}
+        {/* 表單區 */}
         <div className="bg-white rounded-2xl border shadow-sm p-5 mb-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* 聯盟選擇 */}
             <div className="flex flex-col gap-1">
               <label className="text-sm text-gray-700 font-medium">聯盟 / League</label>
               <select
@@ -160,6 +193,7 @@ export default function App() {
               >
                 <option value="MLB">美國職棒 MLB</option>
                 <option value="CPBL">中華職棒 CPBL</option>
+                <option value="NBA">美國職籃 NBA</option>
               </select>
             </div>
 
@@ -180,6 +214,7 @@ export default function App() {
               disabled={league === "MLB" && loadingTeams}
             />
 
+            {/* 日期 */}
             <div className="flex flex-col gap-1">
               <label className="text-sm text-gray-700 font-medium">日期 / Date</label>
               <input
@@ -192,6 +227,7 @@ export default function App() {
               />
             </div>
 
+            {/* 球場顯示 */}
             <div className="flex flex-col gap-1">
               <label className="text-sm text-gray-700 font-medium">球場 / Stadium</label>
               <input
@@ -213,11 +249,11 @@ export default function App() {
           {err && <p className="mt-3 text-red-600 text-sm">{err}</p>}
         </div>
 
-        {/* 結果卡片 */}
+        {/* 預測結果 */}
         {result && (
           <div className="space-y-4">
             <div className="bg-white rounded-xl shadow border p-5">
-              <p className="text-sm text-gray-500">Prediction / 預測比分</p>
+              <p className="text-sm text-gray-500">Prediction / 預測結果</p>
               <p className="text-2xl font-semibold mt-1">{result.prediction}</p>
             </div>
 
@@ -244,7 +280,9 @@ export default function App() {
               <p className="mt-1 leading-relaxed whitespace-pre-line">{result.summaryEn}</p>
             </div>
 
-            <p className="text-xs text-gray-400">※ 球場/先發/傷兵由系統自動判定；若官方資料無對應賽事，將不產生預測。</p>
+            <p className="text-xs text-gray-400">
+              ※ 球場/先發/傷兵/球員狀態由系統自動判定；若官方資料無對應賽事，將不產生預測。
+            </p>
           </div>
         )}
       </div>
