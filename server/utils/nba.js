@@ -1,109 +1,138 @@
 // server/utils/nba.js
-// 使用 RapidAPI 的 NBA Stats API 取得真實 NBA 比賽資料
-// 金鑰來自：c215a160420346985a936754d0757649
+// 使用 RapidAPI - api-nba-v1 取得真實 NBA 資料
 
-import axios from "axios";
-
-const API_KEY = "c215a160420346985a936754d0757649";
-const API_HOST = "api-nba-v1.p.rapidapi.com";
-const BASE_URL = `https://${API_HOST}`;
+const API_BASE = "https://api-nba-v1.p.rapidapi.com";
 
 const headers = {
-  "X-RapidAPI-Key": API_KEY,
-  "X-RapidAPI-Host": API_HOST,
+  "x-rapidapi-key": "c215a160420346985a936754d0757649", // 你的 API Key
+  "x-rapidapi-host": "api-nba-v1.p.rapidapi.com"
 };
 
-function normalizeName(name) {
-  return name.toLowerCase().replace(/\s+/g, "");
+/* -------- 通用 fetch JSON 工具 -------- */
+async function getJSON(url) {
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status} - ${url}`);
+  const json = await res.json();
+  return json;
 }
 
-async function getAllTeams() {
-  const res = await axios.get(`${BASE_URL}/teams`, { headers });
-  return res.data.response;
-}
-
+/* -------- 根據隊名查隊伍 ID -------- */
 async function findTeamIdByName(name) {
-  const teams = await getAllTeams();
-  const match = teams.find((t) =>
-    normalizeName(t.name).includes(normalizeName(name)) ||
-    normalizeName(t.nickname).includes(normalizeName(name)) ||
-    normalizeName(t.code) === normalizeName(name)
-  );
-  return match ? match.id : null;
+  const data = await getJSON(`${API_BASE}/teams`);
+  const list = data?.response || [];
+
+  const norm = (s) => s.toLowerCase().replace(/\s+/g, "");
+
+  return list.find(
+    (t) =>
+      norm(t.name).includes(norm(name)) ||
+      norm(name).includes(norm(t.name)) ||
+      norm(t.nickname).includes(norm(name))
+  )?.id || null;
 }
 
-async function fetchLastGames(teamId) {
-  const res = await axios.get(`${BASE_URL}/games`, {
-    headers,
-    params: {
-      team: teamId,
-      season: 2024,
-      last: 10,
-    },
-  });
-  return res.data.response;
+/* -------- 抓取近期比賽（10–20場） -------- */
+async function fetchRecentGames(teamId) {
+  const year = new Date().getFullYear();
+
+  const data = await getJSON(`${API_BASE}/games?team=${teamId}&season=${year}`);
+  return data?.response || [];
 }
 
-function calcWinLoss(games, teamId) {
-  let wins = 0, losses = 0;
+/* -------- 計算近期與整季戰績 -------- */
+function calculateRecord(games, teamId) {
+  let wins = 0;
+  let losses = 0;
+
   for (const g of games) {
     const isHome = g.teams.home.id === teamId;
     const teamScore = isHome ? g.scores.home.points : g.scores.visitors.points;
     const oppScore = isHome ? g.scores.visitors.points : g.scores.home.points;
+
     if (teamScore > oppScore) wins++;
     else losses++;
   }
-  return { wins, losses, total: games.length };
+
+  return { wins, losses, games: games.length };
 }
 
-async function fetchHeadToHead(teamAId, teamBId) {
-  const res = await axios.get(`${BASE_URL}/games`, {
-    headers,
-    params: {
-      h2h: `${teamAId}-${teamBId}`,
-      season: 2024,
-    },
-  });
-  return res.data.response;
-}
+/* -------- 計算兩隊交手紀錄 -------- */
+function calculateHeadToHead(gamesA, gamesB, teamAId, teamBId) {
+  const all = [...gamesA, ...gamesB];
+  const h2h = all.filter(
+    (g) =>
+      (g.teams.home.id === teamAId && g.teams.visitors.id === teamBId) ||
+      (g.teams.home.id === teamBId && g.teams.visitors.id === teamAId)
+  );
 
-function calcH2H(games, teamAId) {
-  let aWins = 0, bWins = 0;
-  for (const g of games) {
-    const isHomeA = g.teams.home.id === teamAId;
-    const teamAScore = isHomeA ? g.scores.home.points : g.scores.visitors.points;
-    const teamBScore = isHomeA ? g.scores.visitors.points : g.scores.home.points;
-    if (teamAScore > teamBScore) aWins++;
-    else bWins++;
+  let aWins = 0;
+  let bWins = 0;
+
+  for (const g of h2h) {
+    const homeScore = g.scores.home.points;
+    const awayScore = g.scores.visitors.points;
+
+    if (homeScore > awayScore) {
+      if (g.teams.home.id === teamAId) aWins++;
+      else bWins++;
+    } else {
+      if (g.teams.visitors.id === teamAId) aWins++;
+      else bWins++;
+    }
   }
-  return { games: games.length, aWins, bWins };
+
+  return { count: h2h.length, aWins, bWins };
 }
 
-export async function buildNBAStats({ teamA, teamB }) {
+/* -------- buildNBAStats 主函式 -------- */
+export async function buildNBAStats({ teamA, teamB, date }) {
+  // 取得隊伍 ID
   const [teamAId, teamBId] = await Promise.all([
     findTeamIdByName(teamA),
     findTeamIdByName(teamB),
   ]);
-  if (!teamAId || !teamBId) throw new Error("找不到隊伍 ID");
 
-  const [lastA, lastB, h2h] = await Promise.all([
-    fetchLastGames(teamAId),
-    fetchLastGames(teamBId),
-    fetchHeadToHead(teamAId, teamBId),
+  if (!teamAId || !teamBId) {
+    throw new Error(`找不到隊伍：${teamA} 或 ${teamB}`);
+  }
+
+  // 取得比賽資料
+  const [gamesA, gamesB] = await Promise.all([
+    fetchRecentGames(teamAId),
+    fetchRecentGames(teamBId),
   ]);
 
-  const recentStats = {
-    [teamA]: calcWinLoss(lastA, teamAId),
-    [teamB]: calcWinLoss(lastB, teamBId),
+  // 整季 & 近期
+  const seasonStats = {
+    [teamA]: calculateRecord(gamesA, teamAId),
+    [teamB]: calculateRecord(gamesB, teamBId),
   };
 
-  const h2hStats = calcH2H(h2h, teamAId);
-  const location = h2h[0]?.teams.home.name + " 主場" || "未知球場";
+  const recentStats = {
+    [teamA]: calculateRecord(gamesA.slice(0, 10), teamAId),
+    [teamB]: calculateRecord(gamesB.slice(0, 10), teamBId),
+  };
 
+  // 對戰紀錄
+  const h2hStats = calculateHeadToHead(gamesA, gamesB, teamAId, teamBId);
+
+  // 判定球場（找最近一場對戰）
+  const recentH2H = gamesA.find(
+    (g) =>
+      (g.teams.home.id === teamAId && g.teams.visitors.id === teamBId) ||
+      (g.teams.home.id === teamBId && g.teams.visitors.id === teamAId)
+  );
+
+  const location = recentH2H
+    ? `${recentH2H.teams.home.name} 主場`
+    : "未知球場";
+
+  // 回傳資料
   return {
+    seasonStats,
     recentStats,
     h2hStats,
     location,
-    text: `${teamA} 對 ${teamB}，預測場地：${location}`,
+    text: `NBA 資料：${teamA} vs ${teamB}，球場 ${location}`,
   };
 }
