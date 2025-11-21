@@ -1,6 +1,6 @@
-import { buildCPBLStats } from "./cpbl.js";
+import { scrapeCPBLSchedule, buildCPBLStats } from "./cpbl.js";
 import { buildMLBStats } from "./mlb.js";
-import { buildNBAStats } from "./nba.js";
+import { buildNBAStats } from "./nba.js"; // ✅ 新增 NBA 模組
 
 /* ───── 工具 ───── */
 const pad = (n) => String(n).padStart(2, "0");
@@ -8,7 +8,6 @@ const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate(
 
 /* ───── 資料快取 ───── */
 const CACHE = new Map();
-
 async function cacheGet(key, ttlMs, fetcher) {
   const now = Date.now();
   const hit = CACHE.get(key);
@@ -17,7 +16,6 @@ async function cacheGet(key, ttlMs, fetcher) {
   CACHE.set(key, { val, exp: now + ttlMs });
   return val;
 }
-
 async function getJSON(url, ttlMs = 60000) {
   return cacheGet(`json:${url}`, ttlMs, async () => {
     const res = await fetch(url, { headers: { accept: "application/json" } });
@@ -65,7 +63,7 @@ function calculateWinRates({ teamA, teamB, stats }) {
 async function buildStats({ league, ...rest }) {
   if (league === "MLB") return await buildMLBStats(rest);
   if (league === "CPBL") return await buildCPBLStats(rest);
-  if (league === "NBA") return await buildNBAStats(rest);
+  if (league === "NBA") return await buildNBAStats(rest); // ✅ 支援 NBA
   const err = new Error(`Unsupported league: ${league}`);
   err.status = 400;
   throw err;
