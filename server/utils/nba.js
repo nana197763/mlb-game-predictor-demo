@@ -1,5 +1,3 @@
-// ✅ server/utils/nba.js（改為 ESPN 爬蟲版本）
-
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 
@@ -46,8 +44,7 @@ function parseMatchups($) {
 
 // --- 簡易勝率模型 ---
 function calculateRecord(teamName, games) {
-  let wins = 0,
-    losses = 0;
+  let wins = 0, losses = 0;
   for (const g of games) {
     if (g.teamA === teamName) {
       if (g.scoreA > g.scoreB) wins++;
@@ -61,8 +58,7 @@ function calculateRecord(teamName, games) {
 }
 
 function calculateHeadToHead(teamA, teamB, games) {
-  let aWins = 0,
-    bWins = 0;
+  let aWins = 0, bWins = 0;
   const h2hGames = games.filter(
     (g) =>
       (g.teamA === teamA && g.teamB === teamB) ||

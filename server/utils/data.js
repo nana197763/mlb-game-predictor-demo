@@ -1,6 +1,6 @@
 import { scrapeCPBLSchedule, buildCPBLStats } from "./cpbl.js";
 import { buildMLBStats } from "./mlb.js";
-import { buildNBAStats } from "./nba-espn.js"; // 改為 ESPN 版本
+import { buildNBAStats } from "./nba.js"; // ✅ 使用 nba.js
 
 /* ───── 工具 ───── */
 const pad = (n) => String(n).padStart(2, "0");
@@ -63,13 +63,12 @@ function calculateWinRates({ teamA, teamB, stats }) {
 async function buildStats({ league, ...rest }) {
   if (league === "MLB") return await buildMLBStats(rest);
   if (league === "CPBL") return await buildCPBLStats(rest);
-  if (league === "NBA") return await buildNBAStats(rest); // ESPN 版
+  if (league === "NBA") return await buildNBAStats(rest);
   const err = new Error(`Unsupported league: ${league}`);
   err.status = 400;
   throw err;
 }
 
-/* ───── 匯出 ───── */
 export {
   buildStats,
   buildMLBStats,
