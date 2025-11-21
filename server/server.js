@@ -4,7 +4,6 @@ import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import path from "path";
 import { fileURLToPath } from "url";
-import { PredictRequestSchema, PredictResponseSchema } from "./utils/schema.js";
 import { buildStats, calculateWinRates } from "./utils/data.js";
 
 dotenv.config();
