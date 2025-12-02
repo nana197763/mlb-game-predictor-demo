@@ -2,11 +2,16 @@
   "name": "mlb-cpbl-ai-demo",
   "private": true,
   "scripts": {
-    "install": "npm --prefix client i",
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm --prefix server run dev",
+    "dev:client": "npm --prefix client run dev",
     "build": "npm --prefix client run build",
     "start": "node server/server.js"
   },
-  "dependencies": {
+  "devDependencies": {
     "concurrently": "^9.0.1"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
   }
 }
