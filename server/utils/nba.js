@@ -2,190 +2,261 @@
 import fetch from "node-fetch";
 
 /* -------------------------------------------------------
-   NBA：取得比賽、球場、進階數據、近況、對戰、傷兵
+   NBA：使用官方 API（data.nba.net） + ESPN 傷兵
 -------------------------------------------------------- */
+
+function getSeasonYear(date) {
+  const y = Number(date.split("-")[0]);
+  // NBA 賽季 = 每年 10 月開始 → 隔年 6 月結束
+  return y; 
+}
 
 export async function buildNBAStats({ teamA, teamB, date }) {
   try {
-    /* -------------------------------------------------------
-       1. 找官方賽程（使用 balldontlie 免費 API）
-       ------------------------------------------------------- */
-
-    const scheduleUrl = `https://www.balldontlie.io/api/v1/games?dates[]=${date}`;
-    const scheduleResp = await fetch(scheduleUrl);
-    const scheduleData = await scheduleResp.json();
-
-    const games = scheduleData?.data || [];
-
-    const game = games.find(
-      (g) =>
-        g.home_team?.full_name === teamA &&
-        g.visitor_team?.full_name === teamB
-    ) || games.find(
-      (g) =>
-        g.home_team?.full_name === teamB &&
-        g.visitor_team?.full_name === teamA
-    );
-
-    // ❌ 無該場 → 直接 return null
-    if (!game) return null;
-
-    const home = game.home_team.full_name;
-    const away = game.visitor_team.full_name;
-    const location = game.home_team?.city + " Arena";
+    const seasonYear = getSeasonYear(date);
 
     /* -------------------------------------------------------
-       2. 近 10 場（用 standings & last-10 自行統計）
+       1) 讀取 NBA 官方賽程
        ------------------------------------------------------- */
+    const scheduleUrl = `https://data.nba.net/data/10s/prod/v1/${seasonYear}/schedule.json`;
+    const schedule = await fetch(scheduleUrl).then((r) => r.json());
 
+    const games = schedule?.league?.standard || [];
+
+    // 找符合日期的比賽（UTC → local）
+    const game = games.find(g => {
+      const d = g.startDateEastern; // 20231115
+      const yyyy = d.substring(0, 4);
+      const mm = d.substring(4, 6);
+      const dd = d.substring(6, 8);
+      const formatted = `${yyyy}-${mm}-${dd}`;
+
+      return formatted === date &&
+        (
+          (g.hTeam?.triCode === getTriCode(teamA) && g.vTeam?.triCode === getTriCode(teamB)) ||
+          (g.hTeam?.triCode === getTriCode(teamB) && g.vTeam?.triCode === getTriCode(teamA))
+        );
+    });
+
+    if (!game) return null; // 找不到比賽
+
+    const homeId = game.hTeam.teamId;
+    const awayId = game.vTeam.teamId;
+
+    const homeTri = game.hTeam.triCode;
+    const awayTri = game.vTeam.triCode;
+
+    const home = getTeamFullName(homeTri);
+    const away = getTeamFullName(awayTri);
+
+    /* -------------------------------------------------------
+       2) 球場（Arena）
+       ------------------------------------------------------- */
+    const location = game.arena?.name || "Unknown Arena";
+
+    /* -------------------------------------------------------
+       3) 近 10 場戰績（NBA 官方 API）
+       ------------------------------------------------------- */
     async function getLast10(teamId) {
-      try {
-        const url = `https://www.balldontlie.io/api/v1/games?team_ids[]=${teamId}&per_page=10`;
-        const res = await fetch(url);
-        const data = await res.json();
-        const games = data.data;
+      const url = `https://data.nba.net/data/10s/prod/v1/${seasonYear}/teams/${teamId}/schedule.json`;
+      const data = await fetch(url).then(r => r.json());
 
-        let w = 0, l = 0;
-        for (const g of games) {
-          const teamScore = g.home_team.id === teamId ? g.home_team_score : g.visitor_team_score;
-          const oppScore = g.home_team.id === teamId ? g.visitor_team_score : g.home_team_score;
-          if (teamScore > oppScore) w++;
-          else l++;
-        }
-        return { games: 10, w, l };
-      } catch {
-        return { games: 10, w: 5, l: 5 };
+      const recent = data.league.standard
+        .filter(g => g.isGameActivated === false && g.statusNum === 3) // 已完賽
+        .slice(-10);
+
+      let w = 0, l = 0;
+      for (const g of recent) {
+        const isHome = g.hTeam.teamId === teamId;
+        const my = isHome ? g.hTeam.score : g.vTeam.score;
+        const op = isHome ? g.vTeam.score : g.hTeam.score;
+        if (my > op) w++;
+        else l++;
       }
+      return { games: recent.length, w, l };
     }
 
-    const last10 = {
-      [home]: await getLast10(game.home_team.id),
-      [away]: await getLast10(game.visitor_team.id),
+    const recentStats = {
+      [home]: await getLast10(homeId),
+      [away]: await getLast10(awayId),
     };
 
     /* -------------------------------------------------------
-       3. 進階數據（pace, pts）
+       4) 進階數據：PACE / PTS（官方 stats）
        ------------------------------------------------------- */
-
-    async function getAdvanced(teamName) {
+    async function getAdvancedStats(teamId) {
       try {
-        const url = `https://www.basketball-reference.com/leagues/NBA_2024.html`;
-        const html = await fetch(url).then((r) => r.text());
+        const url = `https://data.nba.net/data/10s/prod/v1/${seasonYear}/teams/${teamId}/leaders.json`;
+        const data = await fetch(url).then(r => r.json());
 
-        // 簡易解析 pace/pts（正式版可改 cheerio）
-        const row = html.split(teamName)[1]?.split("</tr>")[0];
-        if (!row) return { pace: "?", pts: "?" };
-
-        const numbers = row.match(/>\d+\.\d+</g)?.map((s) => s.replace(/[<>]/g, ""));
         return {
-          pace: numbers?.[0] || "?",
-          pts: numbers?.[1] || "?",
+          pts: data.league?.standard?.ppg?.value || "?",
+          pace: data.league?.standard?.pace?.value || "?"
         };
       } catch {
-        return { pace: "?", pts: "?" };
+        return { pts: "?", pace: "?" };
       }
     }
 
     const advStats = {
-      [home]: await getAdvanced(home),
-      [away]: await getAdvanced(away),
+      [home]: await getAdvancedStats(homeId),
+      [away]: await getAdvancedStats(awayId),
     };
 
     /* -------------------------------------------------------
-       4. 主客場戰績（簡化）
+       5) 對戰紀錄（H2H）
        ------------------------------------------------------- */
-
-    const homeAwayStats = {
-      [home]: { homeW: 12, homeL: 8 },
-      [away]: { homeW: 10, homeL: 10 },
-    };
-
-    /* -------------------------------------------------------
-       5. 對戰紀錄（h2h）
-       ------------------------------------------------------- */
-
     async function getH2H() {
-      try {
-        const url = `https://www.balldontlie.io/api/v1/games?team_ids[]=${game.home_team.id}&team_ids[]=${game.visitor_team.id}&per_page=30`;
-        const res = await fetch(url);
-        const data = await res.json();
+      const url = `https://data.nba.net/data/10s/prod/v1/${seasonYear}/games.json`;
+      const data = await fetch(url).then(r => r.json());
 
-        let aWins = 0, bWins = 0;
+      const all = data.league.standard.filter(g =>
+        (g.hTeam.teamId === homeId && g.vTeam.teamId === awayId) ||
+        (g.hTeam.teamId === awayId && g.vTeam.teamId === homeId)
+      );
 
-        for (const g of data.data) {
-          const homeScore = g.home_team_score;
-          const awayScore = g.visitor_team_score;
-
-          if (g.home_team.id === game.home_team.id) {
-            if (homeScore > awayScore) aWins++;
-            else bWins++;
-          } else {
-            if (awayScore > homeScore) aWins++;
-            else bWins++;
-          }
+      let aWins = 0, bWins = 0;
+      for (const g of all) {
+        if (g.hTeam.score > g.vTeam.score) {
+          if (g.hTeam.teamId === homeId) aWins++;
+          else bWins++;
+        } else {
+          if (g.vTeam.teamId === homeId) aWins++;
+          else bWins++;
         }
-
-        return { count: data.data.length, aWins, bWins };
-      } catch {
-        return { count: 0, aWins: 0, bWins: 0 };
       }
+
+      return { count: all.length, aWins, bWins };
     }
 
     const h2hStats = await getH2H();
 
     /* -------------------------------------------------------
-       6. 傷兵名單（用 ESPN）
+       6) 傷兵（ESPN）
        ------------------------------------------------------- */
-
-    async function getInjury(teamName) {
+    async function getInjury(teamTri) {
+      const code = teamTri.toLowerCase();
       try {
-        const html = await fetch(`https://www.espn.com/nba/team/injuries/_/name/${teamName.split(" ").pop().toLowerCase()}`)
-          .then((r) => r.text());
+        const html = await fetch(`https://www.espn.com/nba/team/injuries/_/name/${code}`)
+          .then(r => r.text());
 
-        const rows = [...html.matchAll(/class="AnchorLink">(.+?)<\/a><\/td><td>(.+?)<\/td>/g)];
-        return rows.map((r) => ({ player: r[1], status: r[2] }));
+        const result = [...html.matchAll(/AnchorLink">(.+?)<\/a>.*?<td>(Out.*?)<\/td>/gs)];
+        return result.map(r => ({ player: r[1], status: r[2] }));
       } catch {
         return [];
       }
     }
 
     const injuries = {
-      [home]: await getInjury(home),
-      [away]: await getInjury(away),
+      [home]: await getInjury(homeTri),
+      [away]: await getInjury(awayTri),
     };
 
     /* -------------------------------------------------------
-       7. 球隊 Logo
+       7) 球隊 Logo
        ------------------------------------------------------- */
-
-    const logoBase = "https://cdn.nba.com/logos/nba";
     const logos = {
-      [home]: `${logoBase}/${game.home_team.id}/primary/L/logo.svg`,
-      [away]: `${logoBase}/${game.visitor_team.id}/primary/L/logo.svg`,
+      [home]: `https://cdn.nba.com/logos/nba/${homeId}/primary/L/logo.svg`,
+      [away]: `https://cdn.nba.com/logos/nba/${awayId}/primary/L/logo.svg`,
     };
 
     /* -------------------------------------------------------
-       8. 結果回傳（格式 100% 配合 data.js / server.js）
+       8) 返還資料（格式符合 data.js）
        ------------------------------------------------------- */
-
     return {
       league: "NBA",
       homeTeam: home,
       awayTeam: away,
       location,
-      seasonStats: {}, // NBA 沒有 season stats API → 空物件避免 crash
 
-      recentStats: last10,
+      recentStats,
       h2hStats,
       advStats,
-      homeAwayStats,
       injuries,
       logos,
 
+      seasonStats: {},
       text: `${home} vs ${away} NBA stats loaded.`,
     };
+
   } catch (err) {
-    console.error("NBA Stats Error:", err);
+    console.error("NBA Official API Error:", err);
     return null;
   }
+}
+
+/* -------------------------------------------------------
+   工具：隊伍英文縮寫 / 全名
+-------------------------------------------------------- */
+
+function getTriCode(name) {
+  const map = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",
+    "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",
+    "Washington Wizards": "WAS"
+  };
+  return map[name] || null;
+}
+
+function getTeamFullName(tri) {
+  const map = {
+    ATL: "Atlanta Hawks",
+    BOS: "Boston Celtics",
+    BKN: "Brooklyn Nets",
+    CHA: "Charlotte Hornets",
+    CHI: "Chicago Bulls",
+    CLE: "Cleveland Cavaliers",
+    DAL: "Dallas Mavericks",
+    DEN: "Denver Nuggets",
+    DET: "Detroit Pistons",
+    GSW: "Golden State Warriors",
+    HOU: "Houston Rockets",
+    IND: "Indiana Pacers",
+    LAC: "Los Angeles Clippers",
+    LAL: "Los Angeles Lakers",
+    MEM: "Memphis Grizzlies",
+    MIA: "Miami Heat",
+    MIL: "Milwaukee Bucks",
+    MIN: "Minnesota Timberwolves",
+    NOP: "New Orleans Pelicans",
+    NYK: "New York Knicks",
+    OKC: "Oklahoma City Thunder",
+    ORL: "Orlando Magic",
+    PHI: "Philadelphia 76ers",
+    PHX: "Phoenix Suns",
+    POR: "Portland Trail Blazers",
+    SAC: "Sacramento Kings",
+    SAS: "San Antonio Spurs",
+    TOR: "Toronto Raptors",
+    UTA: "Utah Jazz",
+    WAS: "Washington Wizards"
+  };
+  return map[tri] || "Unknown Team";
 }
