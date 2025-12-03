@@ -1,7 +1,6 @@
 // server/utils/cpbl.js
 import * as cheerio from "cheerio";
 
-/* ───── 基本設定 ───── */
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36";
 
@@ -20,6 +19,7 @@ const STADIUM_HINTS = [
 ];
 
 const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, "").trim();
+
 function nameLike(text, canonical) {
   const t = norm(text);
   const c = norm(canonical);
@@ -27,14 +27,16 @@ function nameLike(text, canonical) {
   const alias = TEAM_ALIASES.get(canonical) || [];
   return alias.some((a) => t.includes(norm(a)));
 }
+
 function candidateURLs(iso) {
   const [y, m] = iso.split("-");
   return [
     `https://www.cpbl.com.tw/schedule/index?date=${iso}`,
     `https://www.cpbl.com.tw/schedule/index?year=${y}&month=${m}`,
-    `https://www.cpbl.com.tw/schedule`
+    `https://www.cpbl.com.tw/schedule`,
   ];
 }
+
 function blockText($, el) {
   return $(el).text().replace(/\s+/g, " ").replace(/\u00a0/g, " ").trim();
 }
@@ -87,7 +89,9 @@ export async function scrapeCPBLSchedule({ dateISO, teamA, teamB }) {
   for (const url of urls) {
     tried.push(url);
     try {
-      const r = await fetch(url, { headers: { "user-agent": UA, accept: "text/html" } });
+      const r = await fetch(url, {
+        headers: { "user-agent": UA, accept: "text/html" },
+      });
       if (!r.ok) continue;
       const html = await r.text();
       const $ = cheerio.load(html);
@@ -97,11 +101,12 @@ export async function scrapeCPBLSchedule({ dateISO, teamA, teamB }) {
         const txt = blockText($, row);
         if (!txt) continue;
 
-        if (txt.includes(dateISO) || urls.indexOf(url) === 0) {
-          if (nameLike(txt, teamA) && nameLike(txt, teamB)) {
-            const info = extractVenueAndPitchers(txt, teamA, teamB);
-            return { ...info, urlsTried: tried };
-          }
+        const dateMatch = txt.includes(dateISO) || urls.indexOf(url) === 0;
+        if (!dateMatch) continue;
+
+        if (nameLike(txt, teamA) && nameLike(txt, teamB)) {
+          const info = extractVenueAndPitchers(txt, teamA, teamB);
+          return { ...info, urlsTried: tried, rawText: txt };
         }
       }
     } catch (_) {
@@ -112,19 +117,51 @@ export async function scrapeCPBLSchedule({ dateISO, teamA, teamB }) {
   return null;
 }
 
-/* ───── CPBL 勝率模擬邏輯 ───── */
+/**
+ * TODO：之後可以改成真的從 CPBL 戰績頁面抓數據
+ */
+function dummyTeamRates(teamName) {
+  // 用隊名 hash 出一點變化，避免永遠固定同一隊強
+  const code = [...teamName].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const base = 0.45 + (code % 20) / 200; // 0.45 ~ 0.55
+  const recent = base + ((code % 7) - 3) / 100; // 再微調
+  return {
+    seasonWinRate: Math.max(0.35, Math.min(0.65, base)),
+    recentWinRate: Math.max(0.3, Math.min(0.7, recent)),
+  };
+}
+
+/* ───── CPBL 勝率模擬 ───── */
 export async function buildCPBLStats({ teamA, teamB, date }) {
   const dateISO = date.replace(/\//g, "-");
   const schedule = await scrapeCPBLSchedule({ dateISO, teamA, teamB });
 
+  if (!schedule) {
+    return {
+      hasMatch: false,
+      date: dateISO,
+      seasonStats: {},
+      recentStats: {},
+      h2hStats: { count: 0, aWins: 0, bWins: 0 },
+      pitchersByTeam: {},
+      teamDetails: {},
+      location: null,
+      text: `找不到 ${dateISO} ${teamA} vs ${teamB} 的賽程。`,
+    };
+  }
+
+  // 這裡目前先用假資料：你之後可以改成真實 CPBL 戰績
+  const rateA = dummyTeamRates(teamA);
+  const rateB = dummyTeamRates(teamB);
+
   const seasonStats = {
-    [teamA]: { wins: 35, losses: 25, games: 60 },
-    [teamB]: { wins: 30, losses: 30, games: 60 },
+    [teamA]: { wins: Math.round(rateA.seasonWinRate * 60), losses: 60 - Math.round(rateA.seasonWinRate * 60), games: 60 },
+    [teamB]: { wins: Math.round(rateB.seasonWinRate * 60), losses: 60 - Math.round(rateB.seasonWinRate * 60), games: 60 },
   };
 
   const recentStats = {
-    [teamA]: { w: 6, l: 4, games: 10 },
-    [teamB]: { w: 4, l: 6, games: 10 },
+    [teamA]: { wins: Math.round(rateA.recentWinRate * 10), losses: 10 - Math.round(rateA.recentWinRate * 10), games: 10 },
+    [teamB]: { wins: Math.round(rateB.recentWinRate * 10), losses: 10 - Math.round(rateB.recentWinRate * 10), games: 10 },
   };
 
   const h2hStats = {
@@ -134,16 +171,37 @@ export async function buildCPBLStats({ teamA, teamB, date }) {
   };
 
   const pitchersByTeam = {
-    [teamA]: schedule?.pitcherA || "未定",
-    [teamB]: schedule?.pitcherB || "未定",
+    [teamA]: schedule.pitcherA || "未定",
+    [teamB]: schedule.pitcherB || "未定",
+  };
+
+  const teamDetails = {
+    [teamA]: {
+      seasonWinRate: rateA.seasonWinRate,
+      recentWinRate: rateA.recentWinRate,
+      h2hWinRate: h2hStats.count ? h2hStats.aWins / h2hStats.count : 0.5,
+      starterRating: schedule.pitcherA ? 0.6 : 0.5,
+      homeAdvantage: 0, // 之後有主場資訊可以改
+    },
+    [teamB]: {
+      seasonWinRate: rateB.seasonWinRate,
+      recentWinRate: rateB.recentWinRate,
+      h2hWinRate: h2hStats.count ? h2hStats.bWins / h2hStats.count : 0.5,
+      starterRating: schedule.pitcherB ? 0.6 : 0.5,
+      homeAdvantage: 0,
+    },
   };
 
   return {
+    hasMatch: true,
+    date: dateISO,
     seasonStats,
     recentStats,
     h2hStats,
     pitchersByTeam,
-    location: schedule?.venue || null,
-    text: `CPBL 比賽資料：${teamA} vs ${teamB}，球場 ${schedule?.venue || "未知"}。`,
+    teamDetails,
+    location: schedule.venue || null,
+    homeTeam: null,
+    text: `CPBL 比賽資料：${teamA} vs ${teamB}，球場 ${schedule.venue || "未知"}。`,
   };
 }
