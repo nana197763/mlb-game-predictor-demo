@@ -18,8 +18,11 @@ function calculateWinRates({ teamA, teamB, stats }) {
   const seasonRateB = sB.games ? sB.wins / sB.games : 0.5;
 
   // 近期（10 場）
-  const recentRateA = rA.games ? rA.w / rA.games : 0.5;
-  const recentRateB = rB.games ? rB.w / rB.games : 0.5;
+  const recentWinsA = rA.w ?? rA.wins ?? 0;
+  const recentWinsB = rB.w ?? rB.wins ?? 0;
+
+  const recentRateA = rA.games ? recentWinsA / rA.games : 0.5;
+  const recentRateB = rB.games ? recentWinsB / rB.games : 0.5;
 
   const weightedA = seasonRateA * 0.6 + recentRateA * 0.4;
   const weightedB = seasonRateB * 0.6 + recentRateB * 0.4;
@@ -137,11 +140,101 @@ async function buildStats({ league, ...rest }) {
   throw new Error(`Unsupported league: ${league}`);
 }
 
+export function buildAutoDescriptionZh({ league, teamA, teamB, stats, winRate, predictedScore }) {
+  const lines = [];
+
+  lines.push(`${league} 預測：${teamA} 勝率 ${winRate[teamA]}%，${teamB} 勝率 ${winRate[teamB]}%。`);
+
+  if (predictedScore) {
+    lines.push(`預測比數：${teamA} ${predictedScore[teamA]} : ${predictedScore[teamB]} ${teamB}。`);
+  }
+
+  if (stats.location) {
+    const home = stats.homeTeam || "未知";
+    lines.push(`比賽場地：${stats.location}（主場：${home}）。`);
+  }
+
+  const p = stats.pitchersByTeam || {};
+  if (p[teamA] || p[teamB]) {
+    lines.push(`預計先發投手：${teamA} ${p[teamA] || "未定"}，${teamB} ${p[teamB] || "未定"}。`);
+  }
+
+  if (stats.recentStats) {
+    const a = stats.recentStats[teamA];
+    const b = stats.recentStats[teamB];
+    if (a?.w != null || a?.wins != null) {
+      const aW = a.w ?? a.wins ?? 0;
+      const bW = b.w ?? b.wins ?? 0;
+      const aL = a.l ?? a.losses ?? a.games - aW;
+      const bL = b.l ?? b.losses ?? b.games - bW;
+      lines.push(`近期表現：${teamA} ${aW} 勝 ${aL} 敗；${teamB} ${bW} 勝 ${bL} 敗。`);
+    }
+  }
+
+  if (stats.h2hStats?.count > 0) {
+    const h = stats.h2hStats;
+    lines.push(`本季對戰：${teamA} ${h.aWins} 勝，${teamB} ${h.bWins} 勝（${h.count} 場）。`);
+  }
+
+  if (winRate[teamA] > winRate[teamB]) lines.push(`綜合分析：較看好 **${teamA}**。`);
+  else if (winRate[teamA] < winRate[teamB]) lines.push(`綜合分析：較看好 **${teamB}**。`);
+  else lines.push(`綜合分析：兩隊實力接近。`);
+
+  return lines.join("\n");
+}
+
+export function buildAutoDescriptionEn({ league, teamA, teamB, stats, winRate, predictedScore }) {
+  const lines = [];
+
+  lines.push(`${league} prediction: ${teamA} ${winRate[teamA]}%, ${teamB} ${winRate[teamB]}%.`);
+
+  if (predictedScore) {
+    lines.push(`Expected score: ${teamA} ${predictedScore[teamA]} - ${predictedScore[teamB]} ${teamB}.`);
+  }
+
+  if (stats.location) {
+    const home = stats.homeTeam || "unknown";
+    lines.push(`Venue: ${stats.location}, home team: ${home}.`);
+  }
+
+  const p = stats.pitchersByTeam || {};
+  if (p[teamA] || p[teamB]) {
+    lines.push(
+      `Probable pitchers: ${teamA} ${p[teamA] || "TBD"}, ${teamB} ${p[teamB] || "TBD"}.`
+    );
+  }
+
+  if (stats.recentStats) {
+    const a = stats.recentStats[teamA];
+    const b = stats.recentStats[teamB];
+    if (a?.w != null || a?.wins != null) {
+      const aW = a.w ?? a.wins ?? 0;
+      const bW = b.w ?? b.wins ?? 0;
+      const aL = a.l ?? a.losses ?? a.games - aW;
+      const bL = b.l ?? b.losses ?? b.games - bW;
+      lines.push(`Last 10: ${teamA} ${aW}-${aL}, ${teamB} ${bW}-${bL}.`);
+    }
+  }
+
+  if (stats.h2hStats?.count > 0) {
+    const h = stats.h2hStats;
+    lines.push(`Head-to-head: ${teamA} ${h.aWins} W, ${teamB} ${h.bWins} W.`);
+  }
+
+  if (winRate[teamA] > winRate[teamB]) lines.push(`${teamA} slightly favored.`);
+  else if (winRate[teamA] < winRate[teamB]) lines.push(`${teamB} slightly favored.`);
+  else lines.push(`Even matchup.`);
+
+  return lines.join("\n");
+}
+
 export {
   buildStats,
   buildMLBStats,
   buildCPBLStats,
   buildNBAStats,
   calculateWinRates,
-  predictScore,   // ⚠️ 記得 export 出去
+  predictScore,
+  buildAutoDescriptionZh,
+  buildAutoDescriptionEn,
 };
