@@ -166,10 +166,14 @@ app.post("/api/predict", async (req, res) => {
   }
 });
 
-app.get("*", (req, res, next) => {
-  if (req.path.startsWith("/api")) return next();
+// Express 5 不支援 app.get("*")
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api")) {
+    return next();
+  }
   res.sendFile(path.join(publicDir, "index.html"));
 });
+
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
