@@ -3,10 +3,10 @@ import { buildMLBStats } from "./mlb.js";
 import { buildCPBLStats } from "./cpbl.js";
 import { buildNBAStats } from "./nba.js";
 
-/* ------------------------------------------------------
-   勝率計算
------------------------------------------------------- */
-function calculateWinRates({ teamA, teamB, stats }) {
+/* -------------------------------------------------------------
+   勝率計算（全聯盟共用）
+------------------------------------------------------------- */
+export function calculateWinRates({ teamA, teamB, stats }) {
   const sA = stats.seasonStats?.[teamA] || {};
   const sB = stats.seasonStats?.[teamB] || {};
 
@@ -15,14 +15,11 @@ function calculateWinRates({ teamA, teamB, stats }) {
 
   const h2h = stats.h2hStats || {};
 
-  const seasonRateA = sA.games ? sA.wins / sA.games : 0.5;
-  const seasonRateB = sB.games ? sB.wins / sB.games : 0.5;
+  const seasonRateA = sA.games ? (sA.wins ?? 0) / sA.games : 0.5;
+  const seasonRateB = sB.games ? (sB.wins ?? 0) / sB.games : 0.5;
 
-  const recentWinsA = rA.w ?? rA.wins ?? 0;
-  const recentWinsB = rB.w ?? rB.wins ?? 0;
-
-  const recentRateA = rA.games ? recentWinsA / rA.games : 0.5;
-  const recentRateB = rB.games ? recentWinsB / rB.games : 0.5;
+  const recentRateA = rA.games ? (rA.w ?? rA.wins ?? 0) / rA.games : 0.5;
+  const recentRateB = rB.games ? (rB.w ?? rB.wins ?? 0) / rB.games : 0.5;
 
   const weightedA = seasonRateA * 0.6 + recentRateA * 0.4;
   const weightedB = seasonRateB * 0.6 + recentRateB * 0.4;
@@ -44,37 +41,36 @@ function calculateWinRates({ teamA, teamB, stats }) {
   };
 }
 
-/* ------------------------------------------------------
-   比分預測
------------------------------------------------------- */
-function predictScore({ league, teamA, teamB, winRate }) {
-  const pA = (winRate[teamA] ?? 50) / 100;
-  const pB = (winRate[teamB] ?? 50) / 100;
+/* -------------------------------------------------------------
+   比分預測（含大小分）
+------------------------------------------------------------- */
+export function predictScore({ league, teamA, teamB, winRate }) {
+  const pA = winRate[teamA] / 100;
+  const pB = winRate[teamB] / 100;
   const sumP = pA + pB || 1;
-
   const wA = pA / sumP;
   const wB = pB / sumP;
 
-  let baseTotal;
+  let baseTotal =
+    league === "MLB" ? 8.6 :
+    league === "CPBL" ? 11.4 :
+    league === "NBA" ? 227 :
+    10;
 
-  if (league === "MLB") baseTotal = 8.6;
-  else if (league === "CPBL") baseTotal = 11.4;
-  else if (league === "NBA") baseTotal = 227;
-  else baseTotal = 10;
+  const rand = (min, max) => Math.random() * (max - min) + min;
 
-  function rand(min, max) {
-    return Math.random() * (max - min) + min;
-  }
-
-  function applyVar(score) {
+  function applyVariance(score) {
     if (league === "MLB") return Math.round(score + rand(-2, 2));
     if (league === "CPBL") return Math.round(score + rand(-3, 3));
     if (league === "NBA") return Math.round(score + rand(-8, 8));
     return Math.round(score);
   }
 
-  let sA = applyVar(baseTotal * wA);
-  let sB = applyVar(baseTotal * wB);
+  let rawA = baseTotal * wA;
+  let rawB = baseTotal * wB;
+
+  let sA = applyVariance(rawA);
+  let sB = applyVariance(rawB);
 
   if (league !== "NBA") {
     sA = Math.max(0, sA);
@@ -88,114 +84,109 @@ function predictScore({ league, teamA, teamB, winRate }) {
 
   const total = sA + sB;
   const line = Math.round(baseTotal);
+  const overUnder =
+    total > line
+      ? `預測大分（Total ${total} > Line ${line}）`
+      : `預測小分（Total ${total} < Line ${line}）`;
 
-  const overUnder = total > line
-    ? `預測大分（Total: ${total} > Line: ${line}）`
-    : `預測小分（Total: ${total} < Line: ${line}）`;
-
-  return {
-    [teamA]: sA,
-    [teamB]: sB,
-    total,
-    line,
-    overUnder,
-  };
+  return { [teamA]: sA, [teamB]: sB, total, line, overUnder };
 }
 
-/* ------------------------------------------------------
-   stats 組合器
------------------------------------------------------- */
-async function buildStats({ league, ...rest }) {
+/* -------------------------------------------------------------
+   buildStats — （依聯盟調用對應爬蟲）
+------------------------------------------------------------- */
+export async function buildStats({ league, ...rest }) {
   if (league === "MLB") return buildMLBStats(rest);
   if (league === "CPBL") return buildCPBLStats(rest);
   if (league === "NBA") return buildNBAStats(rest);
   throw new Error(`Unsupported league: ${league}`);
 }
 
-/* ------------------------------------------------------
-   自動說明欄（中文）
------------------------------------------------------- */
-function buildAutoDescriptionZh({ league, teamA, teamB, stats, winRate, predictedScore }) {
+/* -------------------------------------------------------------
+   中文說明（全聯盟加強完整版）
+------------------------------------------------------------- */
+export function buildAutoDescriptionZh({ league, teamA, teamB, stats, winRate, predictedScore }) {
   const lines = [];
 
-  lines.push(`${league} 預測：${teamA} 勝率 ${winRate[teamA]}%，${teamB} ${winRate[teamB]}%。`);
-  lines.push(`預測比數：${teamA} ${predictedScore[teamA]} : ${predictedScore[teamB]} ${teamB}`);
+  /* ---------- 基本資訊 ---------- */
+  lines.push(`${league} 預測：${teamA} 勝率 ${winRate[teamA]}%，${teamB} 勝率 ${winRate[teamB]}%。`);
+  lines.push(`預測比數：${teamA} ${predictedScore[teamA]} : ${predictedScore[teamB]} ${teamB}。`);
+  lines.push(`比賽場地：${stats.location || "未知球場"}。`);
 
-  if (stats.location) {
-    lines.push(`比賽場地：${stats.location}（主場：${stats.homeTeam || "未知"}）。`);
-  }
+  /* ---------- CPBL ---------- */
+  if (league === "CPBL") {
+    const p = stats.pitchersByTeam || {};
+    lines.push(`先發投手：${teamA} ${p[teamA]}；${teamB} ${p[teamB]}。`);
 
-  const p = stats.pitchersByTeam || {};
-  if (p[teamA] || p[teamB]) {
-    lines.push(`預計先發投手：${teamA} ${p[teamA] || "未定"}；${teamB} ${p[teamB] || "未定"}`);
-  }
+    const rA = stats.recentStats?.[teamA];
+    const rB = stats.recentStats?.[teamB];
+    if (rA?.w != null) lines.push(`近期 10 場：${teamA} ${rA.w}-${rA.l}；${teamB} ${rB.w}-${rB.l}。`);
 
-  if (stats.recentStats) {
-    const a = stats.recentStats[teamA];
-    const b = stats.recentStats[teamB];
-
-    if (a) {
-      const aW = a.w ?? a.wins ?? 0;
-      const aL = a.l ?? a.losses ?? a.games - aW;
-      const bW = b.w ?? b.wins ?? 0;
-      const bL = b.l ?? b.losses ?? b.games - bW;
-
-      lines.push(`近期戰績：${teamA} ${aW}-${aL}；${teamB} ${bW}-${bL}`);
+    if (stats.h2hStats?.count > 0) {
+      const h = stats.h2hStats;
+      lines.push(`對戰紀錄：${teamA} ${h.aWins} 勝；${teamB} ${h.bWins} 勝`);
     }
   }
 
-  if (stats.h2hStats?.count) {
-    const h = stats.h2hStats;
-    lines.push(`對戰紀錄：${teamA} ${h.aWins} 勝，${teamB} ${h.bWins} 勝（${h.count} 場）`);
+  /* ---------- MLB ---------- */
+  if (league === "MLB") {
+    const p = stats.pitchersByTeam || {};
+    lines.push(`先發投手：${teamA} ${p[teamA]}；${teamB} ${p[teamB]}。`);
+
+    const sA = stats.seasonStats?.[teamA] || {};
+    const sB = stats.seasonStats?.[teamB] || {};
+
+    lines.push(`投手成績：${teamA} ERA ${sA.era} / WHIP ${sA.whip}；${teamB} ERA ${sB.era} / WHIP ${sB.whip}。`);
+    lines.push(`打擊成績：${teamA} AVG ${sA.avg} / OPS ${sA.ops}；${teamB} AVG ${sB.avg} / OPS ${sB.ops}。`);
+
+    const rA = stats.recentStats?.[teamA];
+    const rB = stats.recentStats?.[teamB];
+    if (rA?.w != null) lines.push(`近期：${teamA} ${rA.w}-${rA.l}；${teamB} ${rB.w}-${rB.l}。`);
+  }
+
+  /* ---------- NBA ---------- */
+  if (league === "NBA") {
+    const advA = stats.advStats?.[teamA] || {};
+    const advB = stats.advStats?.[teamB] || {};
+
+    lines.push(`平均得分：${teamA} ${advA.pts}；${teamB} ${advB.pts}。`);
+    lines.push(`Pace 節奏：${teamA} ${advA.pace}；${teamB} ${advB.pace}。`);
+
+    const haA = stats.homeAwayStats?.[teamA];
+    const haB = stats.homeAwayStats?.[teamB];
+    if (haA?.homeW != null)
+      lines.push(`主客場：${teamA} 主場 ${haA.homeW}-${haA.homeL}；${teamB} 主場 ${haB.homeW}-${haB.homeL}`);
+
+    const rA = stats.recentStats?.[teamA];
+    const rB = stats.recentStats?.[teamB];
+    if (rA?.w != null) lines.push(`近 10 場：${teamA} ${rA.w}-${rA.l}；${teamB} ${rB.w}-${rB.l}。`);
+
+    /* 傷兵列表 */
+    if (stats.injury?.length) {
+      lines.push(`傷兵名單：`);
+      stats.injury.forEach((p) => {
+        lines.push(`- ${p.player} (${p.team})：${p.status}`);
+      });
+    }
   }
 
   return lines.join("\n");
 }
 
-/* ------------------------------------------------------
-   自動說明欄（英文）
------------------------------------------------------- */
-function buildAutoDescriptionEn({ league, teamA, teamB, stats, winRate, predictedScore }) {
-  const lines = [];
-
-  lines.push(`${league} prediction: ${teamA} ${winRate[teamA]}%, ${teamB} ${winRate[teamB]}%.`);
-  lines.push(`Expected score: ${predictedScore[teamA]} - ${predictedScore[teamB]}`);
-
-  if (stats.location) {
-    lines.push(`Venue: ${stats.location}, home: ${stats.homeTeam || "unknown"}`);
-  }
-
-  const p = stats.pitchersByTeam || {};
-  if (p[teamA] || p[teamB]) {
-    lines.push(`Probable pitchers: ${teamA} ${p[teamA] || "TBD"}; ${teamB} ${p[teamB] || "TBD"}`);
-  }
-
-  if (stats.recentStats) {
-    const a = stats.recentStats[teamA];
-    const b = stats.recentStats[teamB];
-
-    if (a) {
-      const aW = a.w ?? a.wins ?? 0;
-      const aL = a.l ?? a.losses ?? a.games - aW;
-      const bW = b.w ?? b.wins ?? 0;
-      const bL = b.l ?? b.losses ?? b.games - bW;
-
-      lines.push(`Last 10: ${teamA} ${aW}-${aL}, ${teamB} ${bW}-${bL}`);
-    }
-  }
-
-  if (stats.h2hStats?.count) {
-    const h = stats.h2hStats;
-    lines.push(`Head-to-head: ${teamA} ${h.aWins} W, ${teamB} ${h.bWins} W`);
-  }
-
-  return lines.join("\n");
+/* -------------------------------------------------------------
+   英文版（簡版）
+------------------------------------------------------------- */
+export function buildAutoDescriptionEn({ league, teamA, teamB, stats, winRate, predictedScore }) {
+  return `${league} prediction:
+${teamA} ${winRate[teamA]}% vs ${teamB} ${winRate[teamB]}%
+Score: ${predictedScore[teamA]} - ${predictedScore[teamB]}
+Venue: ${stats.location || "Unknown"}`;
 }
 
-/* ------------------------------------------------------
-   最終 export（⚠️ 無重複、乾淨）
------------------------------------------------------- */
-export {
+/* -------------------------------------------------------------
+   統一 export
+------------------------------------------------------------- */
+export default {
   buildStats,
   calculateWinRates,
   predictScore,

@@ -1,131 +1,155 @@
 // server/utils/mlb.js
 import fetch from "node-fetch";
 
-const ESPN = "https://site.web.api.espn.com/apis/site/v2/sports/baseball/mlb";
+/* -------------------------------------------------------
+   MLB：取得賽事、先發投手、球場、近況、對戰、打擊/投球數據
+-------------------------------------------------------- */
 
-/* 取得 MLB 賽程（可查當天或未來） */
-async function fetchMLBSchedule(date) {
-  const url = `${ESPN}/scoreboard?dates=${date}`;
-  const res = await fetch(url);
-  return res.json();
-}
+export async function buildMLBStats({ teamA, teamB, date }) {
+  try {
+    const scheduleUrl = `https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=${date}`;
+    const scheduleResp = await fetch(scheduleUrl);
+    const scheduleData = await scheduleResp.json();
 
-/* 查詢 MLB 球隊整季戰績（Standing） */
-async function fetchMLBStandings() {
-  const url = `${ESPN}/standings`;
-  const res = await fetch(url);
-  return res.json();
-}
+    const games = scheduleData?.dates?.[0]?.games || [];
+    const game = games.find(
+      (g) =>
+        g.teams?.away?.team?.name === teamA &&
+        g.teams?.home?.team?.name === teamB
+    ) || games.find(
+      (g) =>
+        g.teams?.away?.team?.name === teamB &&
+        g.teams?.home?.team?.name === teamA
+    );
 
-/* 解析站績到乾淨格式 */
-function parseTeamRecord(teamName, standingsJson) {
-  const groups = standingsJson.children;
-  for (const g of groups) {
-    for (const t of g.standings.entries) {
-      const name = t.team.displayName;
-      if (name.toLowerCase() === teamName.toLowerCase()) {
-        return {
-          wins: t.stats.find(s => s.name === "wins")?.value ?? 0,
-          losses: t.stats.find(s => s.name === "losses")?.value ?? 0,
-          games: t.stats.find(s => s.name === "gamesPlayed")?.value ?? 1
-        };
+    // ❌ 無比賽 → 回傳 null
+    if (!game) return null;
+
+    const home = game.teams.home.team.name;
+    const away = game.teams.away.team.name;
+    const venue = game.venue?.name || "未知球場";
+
+    /* -------------------------------------------------------
+       取得先發投手（probablePitcher）
+    -------------------------------------------------------- */
+    const pitchersByTeam = {};
+
+    const getPitcherName = (teamData) => {
+      const p = teamData?.probablePitcher;
+      if (!p) return "未公布";
+      return p.fullName || "未公布";
+    };
+
+    pitchersByTeam[home] = getPitcherName(game.teams.home);
+    pitchersByTeam[away] = getPitcherName(game.teams.away);
+
+    /* -------------------------------------------------------
+       球隊近況（最近10場）
+    -------------------------------------------------------- */
+    async function getRecent(teamName) {
+      try {
+        const standingsRes = await fetch(
+          `https://statsapi.mlb.com/api/v1/teams?season=2024&sportId=1`
+        );
+        const standings = await standingsRes.json();
+        const team = standings.teams.find((t) => t.name === teamName);
+        if (!team) return null;
+
+        const last10Url = `https://statsapi.mlb.com/api/v1/teams/${team.id}/stats?group=standings&stats=lastTen`;
+        const last10Res = await fetch(last10Url);
+        const last10 = await last10Res.json();
+
+        const record = last10.stats?.[0]?.splits?.[0]?.stat || null;
+        return record ? {
+          games: 10,
+          w: record.wins,
+          l: record.losses
+        } : null;
+      } catch {
+        return null;
       }
     }
-  }
-  return null;
-}
 
-/* 抓 MLB 近 10 場 */
-async function fetchRecent10(teamId) {
-  const url = `${ESPN}/teams/${teamId}/schedule?limit=10`;
-  const res = await fetch(url);
-  const json = await res.json();
-
-  let wins = 0;
-  let losses = 0;
-
-  for (const g of json.events || []) {
-    if (!g.competitions?.[0]) continue;
-    const comp = g.competitions[0];
-    const team = comp.competitors.find(c => c.id === String(teamId));
-    if (!team) continue;
-
-    if (team.winner) wins++;
-    else losses++;
-  }
-
-  return { w: wins, l: losses, games: wins + losses };
-}
-
-/* 抓 MLB 先發投手（ESPN 有完整先發資訊） */
-function extractPitchers(game) {
-  const comp = game.competitions?.[0];
-  if (!comp) return { home: null, away: null };
-
-  const h = comp.competitors.find(c => c.homeAway === "home");
-  const a = comp.competitors.find(c => c.homeAway === "away");
-
-  return {
-    [h.team.displayName]: h.probables?.[0]?.athlete?.displayName || "未公布",
-    [a.team.displayName]: a.probables?.[0]?.athlete?.displayName || "未公布",
-  };
-}
-
-/* ─────────── 主函式 ─────────── */
-export async function buildMLBStats({ teamA, teamB, date }) {
-  const schedule = await fetchMLBSchedule(date);
-
-  // 找比賽
-  let game = null;
-  for (const e of schedule.events || []) {
-    const teams = e.competitions?.[0]?.competitors || [];
-
-    const names = teams.map(t => t.team.displayName);
-    if (
-      names.includes(teamA) &&
-      names.includes(teamB)
-    ) {
-      game = e;
-      break;
-    }
-  }
-
-  if (!game) {
-    return {
-      error: true,
-      text: `找不到 MLB ${date} ${teamA} vs ${teamB} 的比賽資料。`
+    const recentStats = {
+      [home]: await getRecent(home),
+      [away]: await getRecent(away)
     };
+
+    /* -------------------------------------------------------
+       對戰紀錄 head-to-head
+    -------------------------------------------------------- */
+    async function getH2H() {
+      try {
+        const h2hUrl = `https://statsapi.mlb.com/api/v1/teams/${game.teams.home.team.id}/stats?stats=vsTeam&group=hitting`;
+        const res = await fetch(h2hUrl);
+        const data = await res.json();
+
+        const vs = data.stats?.[0]?.splits?.find(
+          (s) => s.opponent?.name === away
+        );
+
+        if (!vs)
+          return { count: 0, aWins: 0, bWins: 0 };
+
+        return {
+          count: vs.stat.gamesPlayed,
+          aWins: vs.stat.wins,
+          bWins: vs.stat.losses
+        };
+      } catch {
+        return { count: 0, aWins: 0, bWins: 0 };
+      }
+    }
+
+    const h2hStats = await getH2H();
+
+    /* -------------------------------------------------------
+       投手 ERA / 打擊 AVG（用 advanced stats）
+    -------------------------------------------------------- */
+
+    async function getTeamStats(teamId) {
+      try {
+        const battingRes = await fetch(
+          `https://statsapi.mlb.com/api/v1/teams/${teamId}/stats?stats=season&group=hitting`
+        );
+        const batting = await battingRes.json();
+        const b = batting.stats?.[0]?.splits?.[0]?.stat || {};
+
+        const pitchingRes = await fetch(
+          `https://statsapi.mlb.com/api/v1/teams/${teamId}/stats?stats=season&group=pitching`
+        );
+        const pitching = await pitchingRes.json();
+        const p = pitching.stats?.[0]?.splits?.[0]?.stat || {};
+
+        return {
+          avg: b.avg,
+          ops: b.ops,
+          era: p.era,
+          whip: p.whip,
+        };
+      } catch {
+        return {};
+      }
+    }
+
+    const homeStats = await getTeamStats(game.teams.home.team.id);
+    const awayStats = await getTeamStats(game.teams.away.team.id);
+
+    return {
+      league: "MLB",
+      homeTeam: home,
+      awayTeam: away,
+      location: venue,
+      pitchersByTeam,
+      seasonStats: {
+        [home]: homeStats,
+        [away]: awayStats,
+      },
+      recentStats,
+      h2hStats,
+    };
+  } catch (err) {
+    console.error("MLB stats error:", err);
+    return null;
   }
-
-  /* 先發投手 */
-  const pitchers = extractPitchers(game);
-
-  /* 整季戰績 */
-  const standings = await fetchMLBStandings();
-  const recA = parseTeamRecord(teamA, standings);
-  const recB = parseTeamRecord(teamB, standings);
-
-  /* teamId */
-  const comp = game.competitions?.[0];
-  const tA = comp.competitors.find(t => t.team.displayName === teamA);
-  const tB = comp.competitors.find(t => t.team.displayName === teamB);
-
-  /* 近況（10 場） */
-  const recentA = await fetchRecent10(tA.id);
-  const recentB = await fetchRecent10(tB.id);
-
-  return {
-    seasonStats: {
-      [teamA]: recA,
-      [teamB]: recB
-    },
-    recentStats: {
-      [teamA]: recentA,
-      [teamB]: recentB,
-    },
-    h2hStats: { count: 0, aWins: 0, bWins: 0 },
-    pitchersByTeam: pitchers,
-    location: game.competitions[0]?.venue?.fullName ?? "未知球場",
-    text: `MLB 比賽資料：${teamA} vs ${teamB}`
-  };
 }

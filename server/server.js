@@ -39,24 +39,28 @@ app.use(express.static(publicDir));
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* ===========================================================
-   🔥 Prediction API
+   🔥 Prediction API（比賽偵測 + 隊徽 + 傷兵）
    =========================================================== */
 app.post("/api/predict", async (req, res) => {
   try {
     const { league, teamA, teamB, date } = req.body;
 
+    /* ---------------- 比賽資料（含球場 & 先發）---------------- */
     const stats = await buildStats({ league, teamA, teamB, date });
 
-    if (!stats) {
+    if (!stats || !stats.hasMatch) {
       return res.status(404).json({
-        message: `找不到 ${league} 在 ${date} 的 ${teamA} vs ${teamB} 比賽資料`,
+        message: `官方賽程中找不到 ${date} 的 ${teamA} vs ${teamB}`,
       });
     }
 
+    /* ---------------- 勝率計算 ---------------- */
     const winRate = calculateWinRates({ teamA, teamB, stats });
+
+    /* ---------------- 比分預測 ---------------- */
     const scores = predictScore({ league, teamA, teamB, winRate });
 
-    /* ---------------- 自動說明欄（中英） ---------------- */
+    /* ---------------- 自動描述（中英） ---------------- */
     const autoZh = buildAutoDescriptionZh({
       league,
       teamA,
@@ -75,21 +79,47 @@ app.post("/api/predict", async (req, res) => {
       predictedScore: scores,
     });
 
+    /* ---------------- 回傳資料（加強版） ---------------- */
     res.json({
       league,
       teamA,
       teamB,
       date,
 
+      /* ---- 基本 ---- */
+      location: stats.location,
+      homeTeam: stats.homeTeam,
+
+      /* ---- 隊徽（MLB/NBA 有，CPBL 我也能加） ---- */
+      logoA: stats.logoA || null,
+      logoB: stats.logoB || null,
+
+      /* ---- 傷兵（NBA） ---- */
+      injury: stats.injury || [],
+
+      /* ---- 先發投手（CPBL/MLB） ---- */
+      pitchers: stats.pitchersByTeam || {},
+
+      /* ---- MLB 投手/打擊數據 ---- */
+      seasonStats: stats.seasonStats,
+      recentStats: stats.recentStats,
+
+      /* ---- NBA 高級數據 ---- */
+      advStats: stats.advStats || {},
+      homeAwayStats: stats.homeAwayStats || {},
+
+      /* ---- 勝率 + 比分 ---- */
       winRate,
       predictedScore: scores,
-      location: stats.location || null,
 
+      /* ---- 自動產生的說明 ---- */
       summaryZh: autoZh,
       summaryEn: autoEn,
 
+      /* ---- 用於 Debug / 文字輸出 ---- */
       rawStatsText: stats.text ?? null,
     });
+
   } catch (err) {
     console.error("❌ Prediction Error:", err);
     res.status(500).json({ message: err.message || "Server error" });
@@ -97,7 +127,7 @@ app.post("/api/predict", async (req, res) => {
 });
 
 /* ===========================================================
-   🔥 Express 5 Fallback Route (修正 path-to-regexp 錯誤)
+   🔥 Fallback (Express 5)
    =========================================================== */
 app.use((req, res, next) => {
   if (req.path.startsWith("/api")) return next();
