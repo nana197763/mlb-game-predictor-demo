@@ -7,45 +7,34 @@ import { buildNBAStats } from "./nba.js";
 function calculateWinRates({ teamA, teamB, stats }) {
   const sA = stats.seasonStats?.[teamA] || {};
   const sB = stats.seasonStats?.[teamB] || {};
+
   const rA = stats.recentStats?.[teamA] || {};
   const rB = stats.recentStats?.[teamB] || {};
+
   const h2h = stats.h2hStats || {};
 
-  const totalGamesA = sA.games || sA.GP || 0;
-  const totalGamesB = sB.games || sB.GP || 0;
+  // 整季勝率
+  const seasonRateA = sA.games ? sA.wins / sA.games : 0.5;
+  const seasonRateB = sB.games ? sB.wins / sB.games : 0.5;
 
-  const winRateA_season = totalGamesA
-    ? (sA.wins ?? sA.W ?? 0) / totalGamesA
-    : 0.5;
-  const winRateB_season = totalGamesB
-    ? (sB.wins ?? sB.W ?? 0) / totalGamesB
-    : 0.5;
+  // 近期（10 場）
+  const recentRateA = rA.games ? rA.w / rA.games : 0.5;
+  const recentRateB = rB.games ? rB.w / rB.games : 0.5;
 
-  const recentGamesA = rA.games || rA.GP || 0;
-  const recentGamesB = rB.games || rB.GP || 0;
+  const weightedA = seasonRateA * 0.6 + recentRateA * 0.4;
+  const weightedB = seasonRateB * 0.6 + recentRateB * 0.4;
 
-  const recentWinRateA = recentGamesA
-    ? (rA.wins ?? rA.W ?? rA.w ?? 0) / recentGamesA
-    : winRateA_season;
+  // 對戰
+  const hCount = h2h.count || 0;
+  const hRateA = hCount ? h2h.aWins / hCount : 0.5;
+  const hRateB = hCount ? h2h.bWins / hCount : 0.5;
 
-  const recentWinRateB = recentGamesB
-    ? (rB.wins ?? rB.W ?? rB.w ?? 0) / recentGamesB
-    : winRateB_season;
-
-  const recentWeightedA = recentWinRateA * 0.4 + winRateA_season * 0.6;
-  const recentWeightedB = recentWinRateB * 0.4 + winRateB_season * 0.6;
-
-  const h2hCount = h2h.count || 0;
-  const h2hWinRateA = h2hCount ? h2h.aWins / h2hCount : 0.5;
-  const h2hWinRateB = h2hCount ? h2h.bWins / h2hCount : 0.5;
-
-  const scoreA =
-    winRateA_season * 0.3 + h2hWinRateA * 0.3 + recentWeightedA * 0.4;
-  const scoreB =
-    winRateB_season * 0.3 + h2hWinRateB * 0.3 + recentWeightedB * 0.4;
+  // 總分
+  const scoreA = weightedA * 0.7 + hRateA * 0.3;
+  const scoreB = weightedB * 0.7 + hRateB * 0.3;
 
   const sum = scoreA + scoreB;
-  const pctA = sum > 0 ? (scoreA * 100) / sum : 50;
+  const pctA = (scoreA / sum) * 100;
   const pctB = 100 - pctA;
 
   return {
@@ -53,6 +42,7 @@ function calculateWinRates({ teamA, teamB, stats }) {
     [teamB]: Number(pctB.toFixed(1)),
   };
 }
+
 
 /** 🔥 新增：依聯盟 + 勝率 → 預測比分 */
 /** 🔥 高級比分預測：依聯盟特性 + 勝率 + pace 調整 */

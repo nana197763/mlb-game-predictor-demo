@@ -1,85 +1,105 @@
-// server/utils/nba.js
 import fetch from "node-fetch";
-import * as cheerio from "cheerio";
 
-const ESPN = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba";
+const ESPN = "https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba";
 
-/* ---------------- NBA Standings ---------------- */
-async function getStandings() {
-  const res = await fetch(`${ESPN}/standings`);
-  const data = await res.json();
+/* 抓賽程 */
+async function fetchNBASchedule(date) {
+  const url = `${ESPN}/scoreboard?dates=${date}`;
+  const res = await fetch(url);
+  return res.json();
+}
 
-  const stats = {};
+/* 抓戰績（Standing） */
+async function fetchNBAStandings() {
+  const url = `${ESPN}/standings`;
+  const res = await fetch(url);
+  return res.json();
+}
 
-  for (const group of data.children) {
-    for (const team of group.standings.entries) {
-      const name = team.team.displayName;
-      const wins = team.stats.find((s) => s.name === "wins").value;
-      const losses = team.stats.find((s) => s.name === "losses").value;
+/* 解析勝負 */
+function parseRecord(teamName, standings) {
+  for (const group of standings.children) {
+    for (const t of group.standings.entries) {
+      if (t.team.displayName.toLowerCase() === teamName.toLowerCase()) {
+        return {
+          wins: t.stats.find(s => s.name === "wins")?.value ?? 0,
+          losses: t.stats.find(s => s.name === "losses")?.value ?? 0,
+          games: t.stats.find(s => s.name === "gamesPlayed")?.value ?? 1,
+        };
+      }
+    }
+  }
+  return { wins: 0, losses: 0, games: 1 };
+}
 
-      stats[name] = {
-        wins,
-        losses,
-        games: wins + losses,
-      };
+/* 近 10 場 */
+async function fetchRecent10(teamId) {
+  const url = `${ESPN}/teams/${teamId}/schedule?limit=10`;
+  const res = await fetch(url);
+  const json = await res.json();
+
+  let wins = 0;
+  let losses = 0;
+
+  for (const g of json.events || []) {
+    const comp = g.competitions?.[0];
+    const t = comp?.competitors?.find(c => c.id === String(teamId));
+    if (!t) continue;
+
+    if (t.winner) wins++;
+    else losses++;
+  }
+
+  return { wins, losses, games: wins + losses };
+}
+
+/* 主函式 */
+export async function buildNBAStats({ teamA, teamB, date }) {
+  const scoreboard = await fetchNBASchedule(date);
+
+  // 找比賽
+  let game = null;
+  for (const e of scoreboard.events || []) {
+    const teams = e.competitions?.[0]?.competitors || [];
+    const names = teams.map(t => t.team.displayName);
+
+    if (names.includes(teamA) && names.includes(teamB)) {
+      game = e;
+      break;
     }
   }
 
-  return stats;
-}
+  if (!game) {
+    return {
+      error: true,
+      text: `找不到 NBA ${date} ${teamA} vs ${teamB} 比賽資料。`
+    };
+  }
 
-/* ---------------- NBA scoreboard (venue) ---------------- */
-async function getMatch(dateISO) {
-  const y = dateISO.replace(/-/g, "");
-  const url = `https://www.espn.com/nba/scoreboard/_/date/${y}`;
+  const standings = await fetchNBAStandings();
 
-  const html = await fetch(url).then((r) => r.text());
-  const $ = cheerio.load(html);
+  const comp = game.competitions?.[0];
+  const tA = comp.competitors.find(t => t.team.displayName === teamA);
+  const tB = comp.competitors.find(t => t.team.displayName === teamB);
 
-  const games = [];
+  const recA = parseRecord(teamA, standings);
+  const recB = parseRecord(teamB, standings);
 
-  $("section.Scoreboard").each((i, el) => {
-    const teams = $(el)
-      .find(".ScoreCell__TeamName")
-      .map((_, t) => $(t).text().trim())
-      .get();
-
-    const venue = $(el).find(".Scoreboard__Venue span").text().trim();
-
-    if (teams.length === 2) {
-      games.push({
-        teamA: teams[0],
-        teamB: teams[1],
-        venue,
-      });
-    }
-  });
-
-  return games;
-}
-
-/* ---------------- Main ---------------- */
-export async function buildNBAStats({ teamA, teamB, date }) {
-  const standings = await getStandings();
-  const games = await getMatch(date);
-
-  const match = games.find(
-    (g) =>
-      (g.teamA === teamA && g.teamB === teamB) ||
-      (g.teamA === teamB && g.teamB === teamA)
-  );
+  const recentA = await fetchRecent10(tA.id);
+  const recentB = await fetchRecent10(tB.id);
 
   return {
     seasonStats: {
-      [teamA]: standings[teamA] || { wins: 0, losses: 0, games: 0 },
-      [teamB]: standings[teamB] || { wins: 0, losses: 0, games: 0 },
+      [teamA]: recA,
+      [teamB]: recB,
     },
     recentStats: {
-      [teamA]: { wins: 5, losses: 5, games: 10 },
-      [teamB]: { wins: 6, losses: 4, games: 10 },
+      [teamA]: { w: recentA.wins, l: recentA.losses, games: recentA.games },
+      [teamB]: { w: recentB.wins, l: recentB.losses, games: recentB.games },
     },
     h2hStats: { count: 0, aWins: 0, bWins: 0 },
-    location: match?.venue || null,
-    text: `NBA：${teamA} vs ${teamB}，球場 ${match?.venue || "未知"}`,
+    pitchersByTeam: {}, // NBA 無投手
+    location: comp?.venue?.fullName || "未知球場",
+    text: `NBA 賽程資料：${teamA} vs ${teamB}`,
   };
 }

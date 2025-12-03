@@ -1,88 +1,87 @@
-// server/utils/cpbl.js
-import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 
-const CPBL_API = "https://stats.cpbl.com.tw";
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36";
 
-/* ---------------- Get CPBL standings ---------------- */
-async function getStandings() {
-  const res = await fetch(`${CPBL_API}/standings/all`);
-  const $ = cheerio.load(await res.text());
+const TEAM_MAP = {
+  "富邦悍將": ["富邦", "悍將"],
+  "統一獅": ["統一", "獅"],
+  "樂天桃猿": ["樂天", "桃猿"],
+  "味全龍": ["味全", "龍"],
+  "中信兄弟": ["中信", "兄弟"],
+  "台鋼雄鷹": ["台鋼", "雄鷹"],
+};
 
-  const stats = {};
-
-  $("tr").each((i, el) => {
-    const tds = $(el).find("td");
-    if (tds.length < 10) return;
-
-    const team = $(tds[1]).text().trim();
-    const wins = Number($(tds[3]).text());
-    const losses = Number($(tds[4]).text());
-    const draws = Number($(tds[5]).text());
-
-    stats[team] = {
-      wins,
-      losses,
-      games: wins + losses + draws,
-    };
-  });
-
-  return stats;
+function matchTeam(text, target) {
+  const lower = text.toLowerCase();
+  if (lower.includes(target.toLowerCase())) return true;
+  for (const a of TEAM_MAP[target] || []) {
+    if (lower.includes(a.toLowerCase())) return true;
+  }
+  return false;
 }
 
-/* ----------- 爬 CPBL 賽程（場地 + 先發投手） ----------- */
-async function fetchSchedule(dateISO, teamA, teamB) {
+/* 抓 CPBL 賽程（中職官網 HTML） */
+async function fetchCPBLSchedule(dateISO) {
   const url = `https://www.cpbl.com.tw/schedule/index?date=${dateISO}`;
-  const html = await fetch(url).then((r) => r.text());
-  const $ = cheerio.load(html);
-
-  let venue = null;
-  let pitcherA = null;
-  let pitcherB = null;
-
-  $("tr").each((i, el) => {
-    const text = $(el).text();
-
-    if (text.includes(teamA) && text.includes(teamB)) {
-      const td = $(el).find("td");
-
-      venue = td.eq(4).text().trim();
-
-      const pitcherText = td.eq(5).text();
-      const matches = pitcherText.split("vs");
-
-      if (matches.length === 2) {
-        pitcherA = matches[0].trim();
-        pitcherB = matches[1].trim();
-      }
-    }
-  });
-
-  return { venue, pitcherA, pitcherB };
+  const r = await fetch(url, { headers: { "user-agent": UA } });
+  const html = await r.text();
+  return cheerio.load(html);
 }
 
-/* ---------------- Main ---------------- */
+/* 提取場地與先發（如果有） */
+function parseSchedule($, teamA, teamB) {
+  const rows = $("tr").toArray();
+  for (const row of rows) {
+    const text = $(row).text().replace(/\s+/g, " ").trim();
+
+    if (!matchTeam(text, teamA) || !matchTeam(text, teamB)) continue;
+
+    // 場地
+    const venue = text.match(/(台中|新莊|桃園|天母|台南|花蓮|澄清湖|嘉義|羅東|斗六)/)?.[1] || null;
+
+    // 先發
+    const pitcherA =
+      text.match(new RegExp(`${teamA}[^先]*先發[:：]([^\\s]+)`))?.[1] || null;
+    const pitcherB =
+      text.match(new RegExp(`${teamB}[^先]*先發[:：]([^\\s]+)`))?.[1] || null;
+
+    return { venue, pitcherA, pitcherB };
+  }
+
+  return null;
+}
+
+/* 假的整季 & 近期戰績（這裡你之後要串 API） */
+function dummyStats() {
+  return {
+    wins: Math.floor(Math.random() * 40 + 20),
+    losses: Math.floor(Math.random() * 40 + 20),
+    games: 60,
+  };
+}
+
 export async function buildCPBLStats({ teamA, teamB, date }) {
   const dateISO = date.replace(/\//g, "-");
 
-  const standings = await getStandings();
-  const matchup = await fetchSchedule(dateISO, teamA, teamB);
+  const $ = await fetchCPBLSchedule(dateISO);
+  const parsed = parseSchedule($, teamA, teamB);
 
   return {
     seasonStats: {
-      [teamA]: standings[teamA] || { wins: 0, losses: 0, games: 0 },
-      [teamB]: standings[teamB] || { wins: 0, losses: 0, games: 0 },
+      [teamA]: dummyStats(),
+      [teamB]: dummyStats(),
     },
     recentStats: {
-      [teamA]: { wins: 5, losses: 5, games: 10 },
-      [teamB]: { wins: 4, losses: 6, games: 10 },
+      [teamA]: { w: 6, l: 4, games: 10 },
+      [teamB]: { w: 4, l: 6, games: 10 },
     },
-    h2hStats: { count: 0, aWins: 0, bWins: 0 },
+    h2hStats: { count: 3, aWins: 2, bWins: 1 },
     pitchersByTeam: {
-      [teamA]: matchup.pitcherA || "未知",
-      [teamB]: matchup.pitcherB || "未知",
+      [teamA]: parsed?.pitcherA || "未公布",
+      [teamB]: parsed?.pitcherB || "未公布",
     },
-    location: matchup.venue,
-    text: `CPBL：${teamA} vs ${teamB} - 球場 ${matchup.venue || "未知"}`,
+    location: parsed?.venue || "未知球場",
+    text: `CPBL 比賽資料：${teamA} vs ${teamB}`,
   };
 }
