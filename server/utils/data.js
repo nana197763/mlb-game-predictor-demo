@@ -227,12 +227,8 @@ export function buildAutoDescriptionEn({ league, teamA, teamB, stats, winRate, p
 
   return lines.join("\n");
 }
-
 export {
   buildStats,
-  buildMLBStats,
-  buildCPBLStats,
-  buildNBAStats,
   calculateWinRates,
   predictScore,
   buildAutoDescriptionZh,
