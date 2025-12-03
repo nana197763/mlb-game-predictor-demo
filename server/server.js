@@ -6,11 +6,7 @@ import rateLimit from "express-rate-limit";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import {
-  buildStats,
-  calculateWinRates,
-  predictScore,
-} from "./utils/data.js";
+import { buildStats, calculateWinRates, predictScore } from "./utils/data.js";
 
 dotenv.config();
 const app = express();
@@ -105,66 +101,49 @@ function buildExplanationEn({ league, teamA, teamB, stats, winRate, predictedSco
 app.post("/api/predict", async (req, res) => {
   try {
     const { league, teamA, teamB, date } = req.body;
-
-    if (!league || !teamA || !teamB || !date) {
-      return res.status(400).json({ message: "缺少 league / teamA / teamB / date 參數" });
-    }
-
     const stats = await buildStats({ league, teamA, teamB, date });
 
-    // 沒有這場比賽，直接回 404
-    if (stats && stats.hasMatch === false) {
+    // 若沒找到比賽（stats 為 null），直接回錯誤
+    if (!stats) {
       return res.status(404).json({
-        message: stats.text || `找不到 ${date} ${teamA} vs ${teamB} 的對戰資料`,
+        message: `找不到 ${league} 在 ${date} 的 ${teamA} vs ${teamB} 比賽資料`,
       });
     }
 
     const winRate = calculateWinRates({ teamA, teamB, stats });
+    const scores = predictScore({ league, teamA, teamB, winRate });
 
-    // 預測比分（棒球 / 籃球各一套）
-    const predictedScore = predictScore({ league, teamA, teamB, winRate, stats });
+    const prediction = `${teamA} vs ${teamB} - 勝率 ${winRate[teamA]}% / ${winRate[teamB]}%`;
+    const scoreLine = `${scores[teamA]} : ${scores[teamB]}`;
 
-    const summaryZh = buildExplanationZh({
-      league,
-      teamA,
-      teamB,
-      stats,
-      winRate,
-      predictedScore,
-    });
+    const summaryZh =
+      `球場：${stats.location || "未知"}。\n` +
+      `${teamA} 勝率 ${winRate[teamA]}%，${teamB} 勝率 ${winRate[teamB]}%。\n` +
+      `預測比分：${teamA} ${scores[teamA]} 比 ${scores[teamB]} ${teamB}。`;
 
-    const summaryEn = buildExplanationEn({
-      league,
-      teamA,
-      teamB,
-      stats,
-      winRate,
-      predictedScore,
-    });
-
-    const prediction = `${teamA} vs ${teamB} - ${winRate[teamA]}% / ${winRate[teamB]}%`;
+    const summaryEn =
+      `Stadium: ${stats.location || "Unknown"}.\n` +
+      `${teamA}: ${winRate[teamA]}%, ${teamB}: ${winRate[teamB]}%.\n` +
+      `Predicted score: ${teamA} ${scores[teamA]} - ${scores[teamB]} ${teamB}.`;
 
     res.json({
-      league,
       teamA,
       teamB,
+      league,
       prediction,
       winRate: { teamA: winRate[teamA], teamB: winRate[teamB] },
-      predictedScore, // { [teamA]: x, [teamB]: y }
-      location: stats.location || null,
+      predictedScore: scores, // ✅ 給前端用
+      location: stats.location,
       summaryZh,
       summaryEn,
+      rawStatsText: stats.text ?? null, // 你在 cpbl/mlb/nba 裡寫的說明欄也一起回
     });
   } catch (err) {
-    if (err.code === "NO_STATS") {
-      return res.status(404).json({
-        message: "查不到足夠的戰績資料，無法預測此場比賽。",
-      });
-    }
     console.error(err);
     res.status(500).json({ message: err.message || "Server error" });
   }
 });
+
 
 // Express 5 不支援 app.get("*")
 app.use((req, res, next) => {

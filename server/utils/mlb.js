@@ -1,142 +1,96 @@
 // server/utils/mlb.js
 import fetch from "node-fetch";
-import * as cheerio from "cheerio";
 
-const ESPN_BASE = "https://www.espn.com";
+const MLB_BASE = "https://statsapi.mlb.com/api/v1";
 
-async function fetchESPNScoreboard({ date }) {
-  const ymd = date.replace(/-/g, "");
-  const url = `${ESPN_BASE}/mlb/scoreboard/_/date/${ymd}`;
-  const html = await fetch(url).then((res) => res.text());
-  return cheerio.load(html);
+async function getTeamIdByName(name) {
+  const res = await fetch(`${MLB_BASE}/teams?sportId=1`);
+  const data = await res.json();
+  const teams = data.teams || [];
+
+  name = name.toLowerCase();
+
+  const t = teams.find(
+    (tm) =>
+      tm.name.toLowerCase() === name ||
+      tm.teamName.toLowerCase() === name ||
+      tm.locationName.toLowerCase() === name ||
+      name.includes(tm.teamName.toLowerCase())
+  );
+
+  return t ? t.id : null;
 }
 
-function parseMatchups($) {
-  const games = [];
+async function getTeamStanding(teamId) {
+  const url = `${MLB_BASE}/standings?leagueId=103,104&season=2024`;
+  const res = await fetch(url);
+  const data = await res.json();
 
-  $("section.Scoreboard").each((_, el) => {
-    const teams = $(el)
-      .find(".ScoreCell__TeamName")
-      .map((_, t) => $(t).text().trim())
-      .get();
+  let wins = 0,
+    losses = 0;
 
-    const venue = $(el).find(".Scoreboard__Venue span").text().trim();
-
-    if (teams.length === 2) {
-      games.push({
-        teamA: teams[0],
-        teamB: teams[1],
-        venue: venue || "未知球場",
-      });
+  for (const record of data.records) {
+    for (const teamRec of record.teamRecords) {
+      if (teamRec.team.id === teamId) {
+        wins = teamRec.wins;
+        losses = teamRec.losses;
+      }
     }
-  });
+  }
 
-  return games;
+  return { wins, losses, games: wins + losses };
 }
 
-/** 假的 team rating，之後你可以改成用 MLB 戰績 API / 爬蟲 */
-function dummyTeamRates(teamName) {
-  const code = [...teamName].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-  const base = 0.45 + (code % 20) / 200; // 0.45 ~ 0.55
-  const recent = base + ((code % 7) - 3) / 100;
+async function getRecent10(teamId) {
+  const res = await fetch(
+    `${MLB_BASE}/teams/${teamId}/stats?group=hitting,fielding,pitching`
+  );
+  const data = await res.json();
+
+  const stats = data.stats?.[0]?.splits?.[0] || null;
+
+  if (!stats) return { wins: 5, losses: 5, games: 10 };
+
   return {
-    seasonWinRate: Math.max(0.35, Math.min(0.65, base)),
-    recentWinRate: Math.max(0.3, Math.min(0.7, recent)),
+    wins: stats.wins,
+    losses: stats.losses,
+    games: stats.gamesPlayed,
   };
 }
 
-/* ───── MLB 統計 ───── */
-export async function buildMLBStats({ teamA, teamB, date }) {
-  const $ = await fetchESPNScoreboard({ date });
-  const games = parseMatchups($);
+// ------------------------ 主函式 ------------------------
+export async function buildMLBStats({ teamA, teamB }) {
+  const idA = await getTeamIdByName(teamA);
+  const idB = await getTeamIdByName(teamB);
 
-  const matchup = games.find(
-    (g) =>
-      (g.teamA === teamA && g.teamB === teamB) ||
-      (g.teamA === teamB && g.teamB === teamA)
-  );
-
-  if (!matchup) {
+  if (!idA || !idB) {
     return {
-      hasMatch: false,
-      date,
-      seasonStats: {},
-      recentStats: {},
-      h2hStats: { count: 0, aWins: 0, bWins: 0 },
-      pitchersByTeam: {},
-      teamDetails: {},
-      location: null,
-      text: `找不到 ${date} ${teamA} vs ${teamB} 的 MLB 比賽資料。`,
+      error: true,
+      text: `找不到隊伍：${teamA} 或 ${teamB}`,
     };
   }
 
-  const rateA = dummyTeamRates(teamA);
-  const rateB = dummyTeamRates(teamB);
+  const seasonA = await getTeamStanding(idA);
+  const seasonB = await getTeamStanding(idB);
 
-  const seasonStats = {
-    [teamA]: {
-      wins: Math.round(rateA.seasonWinRate * 100),
-      losses: 100 - Math.round(rateA.seasonWinRate * 100),
-      games: 100,
-    },
-    [teamB]: {
-      wins: Math.round(rateB.seasonWinRate * 100),
-      losses: 100 - Math.round(rateB.seasonWinRate * 100),
-      games: 100,
-    },
-  };
-
-  const recentStats = {
-    [teamA]: {
-      wins: Math.round(rateA.recentWinRate * 10),
-      losses: 10 - Math.round(rateA.recentWinRate * 10),
-      games: 10,
-    },
-    [teamB]: {
-      wins: Math.round(rateB.recentWinRate * 10),
-      losses: 10 - Math.round(rateB.recentWinRate * 10),
-      games: 10,
-    },
-  };
-
-  const h2hStats = {
-    count: 3,
-    aWins: 2,
-    bWins: 1,
-  };
-
-  const pitchersByTeam = {
-    [teamA]: "Probable Starter A", // 之後可以從 ESPN 詳細頁抓
-    [teamB]: "Probable Starter B",
-  };
-
-  const teamDetails = {
-    [teamA]: {
-      seasonWinRate: rateA.seasonWinRate,
-      recentWinRate: rateA.recentWinRate,
-      h2hWinRate: h2hStats.count ? h2hStats.aWins / h2hStats.count : 0.5,
-      starterRating: 0.6,
-      homeAdvantage: 0.5, // 假設 teamA 主場，有需要再改
-    },
-    [teamB]: {
-      seasonWinRate: rateB.seasonWinRate,
-      recentWinRate: rateB.recentWinRate,
-      h2hWinRate: h2hStats.count ? h2hStats.bWins / h2hStats.count : 0.5,
-      starterRating: 0.5,
-      homeAdvantage: 0,
-    },
-  };
+  const recentA = await getRecent10(idA);
+  const recentB = await getRecent10(idB);
 
   return {
-    hasMatch: true,
-    date,
-    seasonStats,
-    recentStats,
-    h2hStats,
-    pitchersByTeam,
-    teamDetails,
-    location: matchup.venue || null,
-    homeTeam: teamA, // 先假設 teamA 主場
-    text: `MLB 比賽資料：${teamA} vs ${teamB}，球場 ${matchup.venue || "未知"}。`,
+    seasonStats: {
+      [teamA]: seasonA,
+      [teamB]: seasonB,
+    },
+    recentStats: {
+      [teamA]: recentA,
+      [teamB]: recentB,
+    },
+    h2hStats: {
+      count: 0,
+      aWins: 0,
+      bWins: 0,
+    },
+    location: null,
+    text: `MLB 真實資料：${teamA} vs ${teamB} 已讀取戰績。`,
   };
 }

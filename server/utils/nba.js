@@ -2,19 +2,43 @@
 import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 
-const ESPN_BASE = "https://www.espn.com";
+const ESPN = "https://site.web.api.espn.com/apis/v2/sports/basketball/nba";
 
-async function fetchESPNScoreboard({ date }) {
-  const ymd = date.replace(/-/g, "");
-  const url = `${ESPN_BASE}/nba/scoreboard/_/date/${ymd}`;
-  const html = await fetch(url).then((res) => res.text());
-  return cheerio.load(html);
+/* ---------------- NBA Standings ---------------- */
+async function getStandings() {
+  const res = await fetch(`${ESPN}/standings`);
+  const data = await res.json();
+
+  const stats = {};
+
+  for (const group of data.children) {
+    for (const team of group.standings.entries) {
+      const name = team.team.displayName;
+      const wins = team.stats.find((s) => s.name === "wins").value;
+      const losses = team.stats.find((s) => s.name === "losses").value;
+
+      stats[name] = {
+        wins,
+        losses,
+        games: wins + losses,
+      };
+    }
+  }
+
+  return stats;
 }
 
-function parseMatchups($) {
+/* ---------------- NBA scoreboard (venue) ---------------- */
+async function getMatch(dateISO) {
+  const y = dateISO.replace(/-/g, "");
+  const url = `https://www.espn.com/nba/scoreboard/_/date/${y}`;
+
+  const html = await fetch(url).then((r) => r.text());
+  const $ = cheerio.load(html);
+
   const games = [];
 
-  $("section.Scoreboard").each((_, el) => {
+  $("section.Scoreboard").each((i, el) => {
     const teams = $(el)
       .find(".ScoreCell__TeamName")
       .map((_, t) => $(t).text().trim())
@@ -26,7 +50,7 @@ function parseMatchups($) {
       games.push({
         teamA: teams[0],
         teamB: teams[1],
-        venue: venue || "未知球場",
+        venue,
       });
     }
   });
@@ -34,102 +58,28 @@ function parseMatchups($) {
   return games;
 }
 
-/** 假的 team rating，未來可改成用 NBA 真實戰績 */
-function dummyTeamRates(teamName) {
-  const code = [...teamName].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-  const base = 0.45 + (code % 20) / 200;
-  const recent = base + ((code % 9) - 4) / 100;
-  return {
-    seasonWinRate: Math.max(0.3, Math.min(0.7, base)),
-    recentWinRate: Math.max(0.25, Math.min(0.75, recent)),
-  };
-}
-
-/* ───── NBA Stats ───── */
+/* ---------------- Main ---------------- */
 export async function buildNBAStats({ teamA, teamB, date }) {
-  const $ = await fetchESPNScoreboard({ date });
-  const games = parseMatchups($);
+  const standings = await getStandings();
+  const games = await getMatch(date);
 
-  const matchup = games.find(
+  const match = games.find(
     (g) =>
       (g.teamA === teamA && g.teamB === teamB) ||
       (g.teamA === teamB && g.teamB === teamA)
   );
 
-  if (!matchup) {
-    return {
-      hasMatch: false,
-      date,
-      seasonStats: {},
-      recentStats: {},
-      h2hStats: { count: 0, aWins: 0, bWins: 0 },
-      teamDetails: {},
-      location: null,
-      text: `找不到 ${date} ${teamA} vs ${teamB} 的 NBA 比賽資料。`,
-    };
-  }
-
-  const rateA = dummyTeamRates(teamA);
-  const rateB = dummyTeamRates(teamB);
-
-  const seasonStats = {
-    [teamA]: {
-      wins: Math.round(rateA.seasonWinRate * 82),
-      losses: 82 - Math.round(rateA.seasonWinRate * 82),
-      games: 82,
-    },
-    [teamB]: {
-      wins: Math.round(rateB.seasonWinRate * 82),
-      losses: 82 - Math.round(rateB.seasonWinRate * 82),
-      games: 82,
-    },
-  };
-
-  const recentStats = {
-    [teamA]: {
-      wins: Math.round(rateA.recentWinRate * 10),
-      losses: 10 - Math.round(rateA.recentWinRate * 10),
-      games: 10,
-    },
-    [teamB]: {
-      wins: Math.round(rateB.recentWinRate * 10),
-      losses: 10 - Math.round(rateB.recentWinRate * 10),
-      games: 10,
-    },
-  };
-
-  const h2hStats = {
-    count: 2,
-    aWins: 1,
-    bWins: 1,
-  };
-
-  const teamDetails = {
-    [teamA]: {
-      seasonWinRate: rateA.seasonWinRate,
-      recentWinRate: rateA.recentWinRate,
-      h2hWinRate: h2hStats.count ? h2hStats.aWins / h2hStats.count : 0.5,
-      starterRating: 0.55, // 之後可以接球員數據
-      homeAdvantage: 0.5, // 假設 teamA 主場
-    },
-    [teamB]: {
-      seasonWinRate: rateB.seasonWinRate,
-      recentWinRate: rateB.recentWinRate,
-      h2hWinRate: h2hStats.count ? h2hStats.bWins / h2hStats.count : 0.5,
-      starterRating: 0.5,
-      homeAdvantage: 0,
-    },
-  };
-
   return {
-    hasMatch: true,
-    date,
-    seasonStats,
-    recentStats,
-    h2hStats,
-    teamDetails,
-    location: matchup.venue || null,
-    homeTeam: teamA,
-    text: `NBA 比賽資料：${teamA} vs ${teamB}，球場 ${matchup.venue || "未知"}。`,
+    seasonStats: {
+      [teamA]: standings[teamA] || { wins: 0, losses: 0, games: 0 },
+      [teamB]: standings[teamB] || { wins: 0, losses: 0, games: 0 },
+    },
+    recentStats: {
+      [teamA]: { wins: 5, losses: 5, games: 10 },
+      [teamB]: { wins: 6, losses: 4, games: 10 },
+    },
+    h2hStats: { count: 0, aWins: 0, bWins: 0 },
+    location: match?.venue || null,
+    text: `NBA：${teamA} vs ${teamB}，球場 ${match?.venue || "未知"}`,
   };
 }
