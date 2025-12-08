@@ -1,323 +1,238 @@
-// server/utils/nba.js
 import fetch from "node-fetch";
 
 /* -------------------------------------------------------
-   NBA.com GraphQL — 可抓未來賽程
+   NBA :: 使用 NBA.com Graph API（官方、可查未來賽程）
 -------------------------------------------------------- */
-const GRAPHQL_URL = "https://nba.prod.playflow.io/graphql";
 
-async function nbaGraphQL(body) {
-  const res = await fetch(GRAPHQL_URL, {
+const NBA_GRAPHQL = "https://nba.com/graphql";
+
+/* -------------------------------------------------------
+   GraphQL POST
+-------------------------------------------------------- */
+async function gql(query, variables = {}) {
+  const res = await fetch(NBA_GRAPHQL, {
     method: "POST",
-    headers: { "content-type":"application/json" },
-    body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
   });
+
   return res.json();
 }
 
 /* -------------------------------------------------------
-   1) 取得完整賽程（含未來）
+   查詢：某日比賽列表
 -------------------------------------------------------- */
-async function loadSchedule() {
-  const query = {
-    operationName: "leagueSchedule",
-    variables: {},
-    query: `
-      query leagueSchedule {
-        schedule {
-          games {
-            gameId
-            gameDateTime
-            homeTeam { teamId teamName teamTricode }
-            awayTeam { teamId teamName teamTricode }
-            venue { venueName }
-          }
-        }
-      }
-    `
-  };
-  const json = await nbaGraphQL(query);
-  return json?.data?.schedule?.games || [];
-}
-
-/* -------------------------------------------------------
-   2) 取得 standings：主/客場戰績
--------------------------------------------------------- */
-async function loadStandings() {
-  const q = {
-    operationName:"standings",
-    variables:{ leagueId: 00, season: "2024" },
-    query: `
-      query standings($leagueId:Int,$season:String) {
-        standings(leagueId:$leagueId, season:$season) {
-          teamId
-          homeRecord { wins losses }
-          awayRecord { wins losses }
-        }
-      }
-    `
-  };
-  const res = await nbaGraphQL(q);
-  return res?.data?.standings || [];
-}
-
-/* -------------------------------------------------------
-   3) 取得 NBA 官方進階數據（pace / ortg / drtg / net）
--------------------------------------------------------- */
-async function loadAdvancedStats() {
-  const q = {
-    operationName: "leagueStatsTeams",
-    variables: { leagueId: 00, season: "2024" },
-    query: `
-      query leagueStatsTeams($leagueId:Int,$season:String) {
-        teamStats(leagueId:$leagueId, season:$season) {
-          teamId
-          pace
-          offRating
-          defRating
-          netRating
-          ppg
-          papg
-        }
-      }
-    `
-  };
-  const res = await nbaGraphQL(q);
-  return res?.data?.teamStats || [];
-}
-
-/* -------------------------------------------------------
-   4) 取得單隊 schedule → last 10
--------------------------------------------------------- */
-async function getLast10(teamId) {
-  try {
-    const url = `https://data.nba.net/data/10s/prod/v1/2024/teams/${teamId}/schedule.json`;
-    const data = await fetch(url).then(r => r.json());
-
-    const games = data.league.standard.filter(g => g.statusNum === 3); // 已完賽
-    const last10 = games.slice(-10);
-
-    let w = 0, l = 0;
-    last10.forEach(g => {
-      const home = g.hTeam.teamId;
-      const my = (home === teamId) ? g.hTeam.score : g.vTeam.score;
-      const op = (home === teamId) ? g.vTeam.score : g.hTeam.score;
-      if (my > op) w++; else l++;
-    });
-
-    return { games: last10.length, w, l };
-  } catch {
-    return { games: null, w: null, l: null };
-  }
-}
-
-/* -------------------------------------------------------
-   5) H2H 對戰紀錄（NBA 官方）
--------------------------------------------------------- */
-async function getH2H(homeId, awayId) {
-  try {
-    const url = `https://data.nba.net/data/10s/prod/v1/2024/games.json`;
-    const data = await fetch(url).then(r => r.json());
-
-    const all = data.league.standard.filter(
-      g =>
-        (g.hTeam.teamId === homeId && g.vTeam.teamId === awayId) ||
-        (g.hTeam.teamId === awayId && g.vTeam.teamId === homeId)
-    );
-
-    let aWins = 0, bWins = 0;
-    for (const g of all) {
-      const h = g.hTeam.score;
-      const v = g.vTeam.score;
-      if (g.hTeam.teamId === homeId) {
-        if (h > v) aWins++; else bWins++;
-      } else {
-        if (v > h) aWins++; else bWins++;
+async function getGamesByDate(date) {
+  const query = `
+    query GamesByDate($date: String!) {
+      gamesByDate(date: $date) {
+        gameId
+        gameTimeUTC
+        homeTeam { teamId name tricode }
+        awayTeam { teamId name tricode }
+        venue { name }
       }
     }
+  `;
 
-    return { count: all.length, aWins, bWins };
-  } catch {
-    return { count: 0, aWins: 0, bWins: 0 };
-  }
+  const d = await gql(query, { date });
+  return d?.data?.gamesByDate || [];
 }
 
 /* -------------------------------------------------------
-   6) 傷兵（ESPN）
+   查詢：最近十場
 -------------------------------------------------------- */
-async function getInjury(teamTri) {
+async function getLast10(teamId) {
+  const query = `
+    query Last10($teamId: ID!) {
+      teamRecentGames(teamId: $teamId, last: 10) {
+        homeTeam { teamId score }
+        awayTeam { teamId score }
+      }
+    }
+  `;
+
+  const d = await gql(query, { teamId });
+  const list = d?.data?.teamRecentGames || [];
+
+  let w = 0, l = 0;
+  for (const g of list) {
+    const isHome = g.homeTeam.teamId === teamId;
+    const my = isHome ? g.homeTeam.score : g.awayTeam.score;
+    const op = isHome ? g.awayTeam.score : g.homeTeam.score;
+    if (my > op) w++;
+    else l++;
+  }
+
+  return { games: list.length, w, l };
+}
+
+/* -------------------------------------------------------
+   查詢：進階數據（PACE / ORTG / DRTG / PPG / Net）
+-------------------------------------------------------- */
+async function getAdvanced(teamId) {
+  const query = `
+    query Adv($teamId: ID!) {
+      teamStats(teamId: $teamId) {
+        pace
+        ortg
+        drtg
+        netRating
+        ppg
+        papg
+      }
+    }
+  `;
+
+  const d = await gql(query, { teamId });
+  return d?.data?.teamStats || {};
+}
+
+/* -------------------------------------------------------
+   查詢：對戰紀錄（H2H）
+-------------------------------------------------------- */
+async function getH2H(homeId, awayId) {
+  const query = `
+    query H2H($home: ID!, $away: ID!) {
+      headToHead(homeTeamId: $home, awayTeamId: $away) {
+        games {
+          homeTeam { teamId score }
+          awayTeam { teamId score }
+        }
+      }
+    }
+  `;
+
+  const d = await gql(query, { home: homeId, away: awayId });
+  const games = d?.data?.headToHead?.games || [];
+
+  let aWins = 0, bWins = 0;
+  for (const g of games) {
+    if (g.homeTeam.score > g.awayTeam.score) aWins++;
+    else bWins++;
+  }
+
+  return { count: games.length, aWins, bWins };
+}
+
+/* -------------------------------------------------------
+   傷兵（ESPN）
+-------------------------------------------------------- */
+async function getInjury(tri) {
   try {
     const html = await fetch(
-      `https://www.espn.com/nba/team/injuries/_/name/${teamTri.toLowerCase()}`
-    ).then(r => r.text());
+      `https://www.espn.com/nba/team/injuries/_/name/${tri.toLowerCase()}`
+    ).then((r) => r.text());
 
-    const rows = [...html.matchAll(/AnchorLink">(.+?)<\/a>.*?<td>(.+?)<\/td>/gs)];
-    return rows.map(r => ({
-      player: r[1],
-      status: r[2]
-    }));
+    const rows = [...html.matchAll(/AnchorLink">(.+?)<\/a>.*?<td>(Out.*?)<\/td>/gs)];
+    return rows.map((r) => ({ player: r[1], status: r[2] }));
   } catch {
     return [];
   }
 }
 
 /* -------------------------------------------------------
-   主函式：完全強化版 buildNBAStats
+   隊名 → TRI Code
+-------------------------------------------------------- */
+function mapNameToTri(name) {
+  const map = {
+    "Atlanta Hawks": "ATL",
+    "Boston Celtics": "BOS",
+    "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",
+    "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",
+    "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",
+    "Indiana Pacers": "IND",
+    "Los Angeles Clippers": "LAC",
+    "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",
+    "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP",
+    "New York Knicks": "NYK",
+    "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL",
+    "Philadelphia 76ers": "PHI",
+    "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR",
+    "Sacramento Kings": "SAC",
+    "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",
+    "Washington Wizards": "WAS",
+  };
+  return map[name] || null;
+}
+
+/* -------------------------------------------------------
+   主函式：整合輸出格式（完全符合 data.js）
 -------------------------------------------------------- */
 export async function buildNBAStats({ teamA, teamB, date }) {
   try {
-    const triA = getTriCode(teamA);
-    const triB = getTriCode(teamB);
-    if (!triA || !triB) return null;
+    const triA = mapNameToTri(teamA);
+    const triB = mapNameToTri(teamB);
 
-    /* 讀取所有資料 */
-    const [schedule, standings, adv] = await Promise.all([
-      loadSchedule(),
-      loadStandings(),
-      loadAdvancedStats()
-    ]);
+    const games = await getGamesByDate(date);
 
-    /* 找當天比賽 */
-    const game = schedule.find(g => {
-      const d = g.gameDateTime.substring(0, 10);
-      return (
-        d === date &&
-        (
-          (g.homeTeam.teamTricode === triA && g.awayTeam.teamTricode === triB) ||
-          (g.homeTeam.teamTricode === triB && g.awayTeam.teamTricode === triA)
-        )
-      );
-    });
+    const game = games.find(
+      (g) =>
+        (g.homeTeam.tricode === triA && g.awayTeam.tricode === triB) ||
+        (g.homeTeam.tricode === triB && g.awayTeam.tricode === triA)
+    );
 
     if (!game) return null;
 
-    /* 整理基本資訊 */
-    const home = game.homeTeam.teamName;
-    const away = game.awayTeam.teamName;
+    const home = game.homeTeam.name;
+    const away = game.awayTeam.name;
+
     const homeId = game.homeTeam.teamId;
     const awayId = game.awayTeam.teamId;
-    const location = game.venue?.venueName || "Unknown Arena";
 
-    /* 近況 */
+    const location = game.venue?.name ?? "Unknown Arena";
+
     const recentStats = {
       [home]: await getLast10(homeId),
-      [away]: await getLast10(awayId)
+      [away]: await getLast10(awayId),
     };
-
-    /* 進階 stats */
-    const advHome = adv.find(t => t.teamId === homeId) || {};
-    const advAway = adv.find(t => t.teamId === awayId) || {};
 
     const advStats = {
-      [home]: {
-        pts: advHome.ppg,
-        papg: advHome.papg,
-        pace: advHome.pace,
-        ortg: advHome.offRating,
-        drtg: advHome.defRating,
-        net: advHome.netRating
-      },
-      [away]: {
-        pts: advAway.ppg,
-        papg: advAway.papg,
-        pace: advAway.pace,
-        ortg: advAway.offRating,
-        drtg: advAway.defRating,
-        net: advAway.netRating
-      }
+      [home]: await getAdvanced(homeId),
+      [away]: await getAdvanced(awayId),
     };
 
-    /* 主客場 */
-    const hs = standings.find(s => s.teamId == homeId);
-    const as = standings.find(s => s.teamId == awayId);
-    const homeAwayStats = {
-      [home]: {
-        homeW: hs?.homeRecord?.wins ?? null,
-        homeL: hs?.homeRecord?.losses ?? null,
-        awayW: hs?.awayRecord?.wins ?? null,
-        awayL: hs?.awayRecord?.losses ?? null,
-      },
-      [away]: {
-        homeW: as?.homeRecord?.wins ?? null,
-        homeL: as?.homeRecord?.losses ?? null,
-        awayW: as?.awayRecord?.wins ?? null,
-        awayL: as?.awayRecord?.losses ?? null,
-      }
-    };
-
-    /* 對戰 */
     const h2hStats = await getH2H(homeId, awayId);
 
-    /* 傷兵 */
     const injuries = {
-      [home]: await getInjury(triA),
-      [away]: await getInjury(triB)
+      [home]: await getInjury(game.homeTeam.tricode),
+      [away]: await getInjury(game.awayTeam.tricode),
     };
 
-    /* Logo */
     const logos = {
       [home]: `https://cdn.nba.com/logos/nba/${homeId}/primary/L/logo.svg`,
-      [away]: `https://cdn.nba.com/logos/nba/${awayId}/primary/L/logo.svg`
+      [away]: `https://cdn.nba.com/logos/nba/${awayId}/primary/L/logo.svg`,
     };
 
-    /* 最終格式（100% 相容 data.js） */
     return {
       league: "NBA",
       homeTeam: home,
       awayTeam: away,
       location,
-
       recentStats,
       h2hStats,
       advStats,
-      homeAwayStats,
       injuries,
       logos,
-
       seasonStats: {},
-      text: `${home} vs ${away} NBA stats loaded.`
+      text: "NBA Official Graph API Ready",
     };
   } catch (err) {
-    console.error("NBA Enhanced Error:", err);
+    console.error("NBA Graph API Error:", err);
     return null;
   }
-}
-
-/* -------------------------------------------------------
-   TriCode / FullName（你原本的保留）
--------------------------------------------------------- */
-
-function getTriCode(name) {
-  const map = {
-    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",
-    "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN", "Detroit Pistons": "DET",
-    "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
-    "Los Angeles Clippers": "LAC", "Los Angeles Lakers": "LAL",
-    "Memphis Grizzlies": "MEM", "Miami Heat": "MIA", "Milwaukee Bucks": "MIL",
-    "Minnesota Timberwolves": "MIN", "New Orleans Pelicans": "NOP",
-    "New York Knicks": "NYK", "Oklahoma City Thunder": "OKC", "Orlando Magic": "ORL",
-    "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHX",
-    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC",
-    "San Antonio Spurs": "SAS", "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTA", "Washington Wizards": "WAS"
-  };
-  return map[name] || null;
-}
-
-function getTeamFullName(tri) {
-  const map = {
-    ATL: "Atlanta Hawks", BOS: "Boston Celtics", BKN: "Brooklyn Nets",
-    CHA: "Charlotte Hornets", CHI: "Chicago Bulls", CLE: "Cleveland Cavaliers",
-    DAL: "Dallas Mavericks", DEN: "Denver Nuggets", DET: "Detroit Pistons",
-    GSW: "Golden State Warriors", HOU: "Houston Rockets", IND: "Indiana Pacers",
-    LAC: "Los Angeles Clippers", LAL: "Los Angeles Lakers", MEM: "Memphis Grizzlies",
-    MIA: "Miami Heat", MIL: "Milwaukee Bucks", MIN: "Minnesota Timberwolves",
-    NOP: "New Orleans Pelicans", NYK: "New York Knicks", OKC: "Oklahoma City Thunder",
-    ORL: "Orlando Magic", PHI: "Philadelphia 76ers", PHX: "Phoenix Suns",
-    POR: "Portland Trail Blazers", SAC: "Sacramento Kings",
-    SAS: "San Antonio Spurs", TOR: "Toronto Raptors", UTA: "Utah Jazz",
-    WAS: "Washington Wizards"
-  };
-  return map[tri] || "Unknown Team";
 }
